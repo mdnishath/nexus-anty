@@ -221,6 +221,7 @@ class LoginBrain:
         # 2FA loop prevention — tracks which options have been tried & failed
         self.tried_2fa_options: set = set()   # {'authenticator','backup','recovery_phone','recovery_email'}
         self.selection_page_visits: int = 0
+        self._empty_selection_scans: int = 0  # transient empty option-scans before bypass
 
         # Unknown screen loop prevention
         self._unknown_consecutive: int = 0
@@ -717,6 +718,21 @@ class LoginBrain:
                 "2FA_EXHAUSTED - All 2FA options tried repeatedly, none succeeded."
             )
 
+        # ── Wait for the option list to actually RENDER before scanning ──
+        # The selection page (challenge/selection) is detected by URL the instant
+        # it loads, but the [data-challengetype] options (Authenticator / Backup
+        # code / …) appear a beat later. Scanning too early finds nothing and
+        # wrongly falls through to STEP 4 'Try another way', which loops straight
+        # back to this page → intermittent login failures (the exact bug: it
+        # clicks 'Try another way' instead of selecting Authenticator/backup).
+        try:
+            await self.page.wait_for_selector(
+                '[data-challengetype], li[role="link"], div[role="link"][data-challengeid]',
+                state='visible', timeout=8000,
+            )
+        except Exception:
+            await self._wait(2)
+
         # ══════════════════════════════════════════════════════════════
         # STEP 1: SCAN all [data-challengetype] elements on the page
         # Build a categorized map: { category: (element, type, text) }
@@ -866,6 +882,21 @@ class LoginBrain:
                         return HandlerResult.cont()
             except Exception:
                 pass
+
+            # The options probably just haven't rendered yet. Re-detect a couple
+            # of times (the page is unchanged) BEFORE falling through to STEP 4
+            # 'Try another way' — otherwise a transient empty scan makes us click
+            # 'Try another way' and loop straight back here (the reported bug).
+            self._empty_selection_scans += 1
+            if self._empty_selection_scans < 3:
+                await self._log(f"  No options yet (empty scan "
+                                f"{self._empty_selection_scans}/3) — waiting + re-detecting...")
+                await self._wait(2)
+                return HandlerResult.cont()
+            await self._log("  Still no options after retries — falling through to bypass")
+        else:
+            # Options rendered fine → reset the transient-miss counter.
+            self._empty_selection_scans = 0
 
         # ══════════════════════════════════════════════════════════════
         # STEP 2: SELECT by priority — Authenticator → Backup → Phone → Email → SMS

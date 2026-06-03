@@ -1,0 +1,536 @@
+/**
+ * app.js — Main coordinator.
+ *
+ * Initializes shared state, wires up navigation, step selection,
+ * and delegates to focused modules loaded before this file:
+ *   modules/logs.js        — Log DOM, escapeHtml, tag detection
+ *   modules/server.js      — Backend health, detection, online/offline
+ *   modules/processing.js  — Start/stop, progress, log stream, file input
+ *   modules/config.js      — Config, proxy, fingerprint panels
+ *   modules/reports.js     — Reports, templates
+ *   modules/debug.js       — Debug browser panel
+ *   modules/totp.js        — TOTP generator widget
+ */
+(function (App) {
+    'use strict';
+
+    // ── Shared State ────────────────────────────────────────────────────
+    App.state = App.state || {};
+    App.state.serverOnline = false;
+    App.state.processing = false;
+    App.state.currentFilePath = '';
+    App.state.lastLogId = 0;
+    App.state.userStartedServer = false;
+
+    // ── Global Toast System ─────────────────────────────────────────────
+    App.toast = function (message, type = 'info', duration = 3000) {
+        let container = document.getElementById('toastContainer');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'toastContainer';
+            document.body.appendChild(container);
+        }
+
+        const icons = {
+            success: 'fa-check-circle',
+            error: 'fa-exclamation-circle',
+            warning: 'fa-exclamation-triangle',
+            info: 'fa-info-circle'
+        };
+        
+        const toast = document.createElement('div');
+        toast.className = `app-toast ${type}`;
+        toast.innerHTML = `<i class="fas ${icons[type] || icons.info}"></i> <span>${message}</span>`;
+        
+        container.appendChild(toast);
+        
+        // Trigger reflow for animation
+        toast.offsetHeight;
+        toast.classList.add('show');
+        
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => {
+                if (toast.parentNode) toast.parentNode.removeChild(toast);
+            }, 300); // match CSS transition
+        }, duration);
+    };
+
+    // ── Global Confirm Modal ────────────────────────────────────────────
+    App.confirm = function (message, confirmText = 'Confirm', confirmClass = 'btn-danger', iconClass = 'fa-exclamation-triangle') {
+        return new Promise(resolve => {
+            const old = document.getElementById('pmConfirmOverlay');
+            if (old) old.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'pmConfirmOverlay';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+            overlay.innerHTML = `
+                <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:16px;padding:32px 40px;max-width:500px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.5);animation:modalIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);">
+                    <div style="margin-bottom:20px;"><i class="fas ${iconClass}" style="font-size:48px;color:${confirmClass.includes('danger') ? '#ef4444' : '#6366f1'};"></i></div>
+                    <h3 style="color:var(--text,#fff);margin:0 0 12px;font-size:20px;font-weight:600;">Confirm Action</h3>
+                    <p style="color:rgba(255,255,255,0.7);margin:0 0 28px;font-size:15px;line-height:1.5;">${message}</p>
+                    <div style="display:flex;gap:16px;justify-content:center;">
+                        <button id="pmConfirmNo" class="btn btn-outline" style="padding:10px 32px;flex:1;font-weight:600;">Cancel</button>
+                        <button id="pmConfirmYes" class="btn ${confirmClass}" style="padding:10px 32px;flex:1;font-weight:600;">${confirmText}</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+
+            overlay.querySelector('#pmConfirmYes').addEventListener('click', () => { overlay.remove(); resolve(true); });
+            overlay.querySelector('#pmConfirmNo').addEventListener('click', () => { overlay.remove(); resolve(false); });
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+            
+            // Add ESC key support for closing the confirm modal
+            const onEsc = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onEsc); resolve(false); } };
+            document.addEventListener('keydown', onEsc);
+        });
+    };
+
+    // ── Global Choose Dialog (selection from multiple options) ──────────
+    App.choose = function (message, options = []) {
+        return new Promise(resolve => {
+            const old = document.getElementById('pmChooseOverlay');
+            if (old) old.remove();
+
+            const overlay = document.createElement('div');
+            overlay.id = 'pmChooseOverlay';
+            overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+
+            const optionsHTML = options.map((opt, i) => `
+                <button class="pm-choose-btn" data-option="${i}" style="display:block;width:100%;padding:14px 18px;margin:8px 0;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:var(--text,#fff);font-size:14px;cursor:pointer;transition:all 0.2s;text-align:left;">
+                    <span style="margin-right:12px;">▸</span>${opt}
+                </button>
+            `).join('');
+
+            overlay.innerHTML = `
+                <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:16px;padding:32px 40px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.5);animation:modalIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);">
+                    <h3 style="color:var(--text,#fff);margin:0 0 8px;font-size:18px;font-weight:600;">Select Option</h3>
+                    <p style="color:rgba(255,255,255,0.6);margin:0 0 20px;font-size:13px;">${message}</p>
+                    <div style="display:flex;flex-direction:column;">
+                        ${optionsHTML}
+                    </div>
+                    <button id="pmChooseCancel" class="btn btn-outline" style="width:100%;padding:10px 16px;margin-top:20px;font-weight:600;">Cancel</button>
+                </div>`;
+            document.body.appendChild(overlay);
+
+            overlay.querySelectorAll('.pm-choose-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const idx = parseInt(btn.dataset.option);
+                    overlay.remove();
+                    resolve(options[idx]);
+                });
+                btn.addEventListener('mouseover', () => {
+                    btn.style.background = 'rgba(255,255,255,0.12)';
+                    btn.style.borderColor = 'rgba(255,255,255,0.2)';
+                });
+                btn.addEventListener('mouseout', () => {
+                    btn.style.background = 'rgba(255,255,255,0.06)';
+                    btn.style.borderColor = 'rgba(255,255,255,0.1)';
+                });
+            });
+
+            overlay.querySelector('#pmChooseCancel').addEventListener('click', () => { overlay.remove(); resolve(null); });
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
+
+            const onEsc = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onEsc); resolve(null); } };
+            document.addEventListener('keydown', onEsc);
+        });
+    };
+
+    // ── Navigation ──────────────────────────────────────────────────────
+    function setupNavigation() {
+        // Global ESC key listener for modals
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const overlays = [
+                    document.getElementById('pmConfirmOverlay'),
+                    document.getElementById('pmChooseOverlay'),
+                    document.getElementById('profileModalOverlay'),
+                    document.getElementById('batchLoginModalOverlay'),
+                    document.getElementById('extModalOverlay'),
+                    document.getElementById('authFileModal'),
+                    document.getElementById('imageModalOverlay'),
+                    document.getElementById('driveBackupModal')
+                ];
+                
+                for (const overlay of overlays) {
+                    if (overlay && overlay.style.display !== 'none' && document.body.contains(overlay)) {
+                        const closeBtn = overlay.querySelector('#profileModalCloseBtn, #batchLoginModalCloseBtn, #extModalCloseBtn, .tools-modal-close, #driveBackupModalClose, #pmConfirmNo');
+                        if (closeBtn) {
+                            closeBtn.click();
+                            e.preventDefault();
+                            break;
+                        } else {
+                            overlay.style.display = 'none';
+                            e.preventDefault();
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '6') {
+                const pages = ['dashboard', 'profiles', 'results', 'config', 'tools', 'about'];
+                const idx = parseInt(e.key) - 1;
+                if (pages[idx]) {
+                    e.preventDefault();
+                    const nav = document.querySelector(`.nav-item[data-page="${pages[idx]}"]`);
+                    if (nav) nav.click();
+                }
+            }
+        });
+
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+                item.classList.add('active');
+
+                const targetPage = item.getAttribute('data-page');
+                document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
+                document.getElementById(targetPage).classList.add('active');
+
+                if (targetPage === 'results' && App.loadReports) App.loadReports();
+                if (targetPage === 'config') {
+                    if (App.loadConfig) App.loadConfig();
+                    if (App.loadNexusApiKey) App.loadNexusApiKey();
+                }
+                if (targetPage === 'tools' && App.loadToolsPage) App.loadToolsPage();
+                if (targetPage === 'profiles' && App.loadProfiles) App.loadProfiles();
+            });
+        });
+
+        // Go to Profiles button on dashboard
+        const goToProfilesBtn = document.getElementById('goToProfilesBtn');
+        if (goToProfilesBtn) {
+            goToProfilesBtn.addEventListener('click', () => {
+                const nav = document.querySelector('.nav-item[data-page="profiles"]');
+                if (nav) nav.click();
+            });
+        }
+    }
+
+    // ── Step Selection ──────────────────────────────────────────────────
+    const stepInputs = document.querySelectorAll('input[name="botStep"]');
+    const stepCards = document.querySelectorAll('.step-card');
+
+    App.getSelectedSteps = function () {
+        const selected = [];
+        stepInputs.forEach(input => {
+            if (input.checked) selected.push(parseInt(input.value));
+        });
+        return selected.sort((a, b) => a - b);
+    };
+
+    function applyStepUI(selectedSteps) {
+        const opsListS1 = document.getElementById('operationsListStep1');
+        const opsList = document.getElementById('operationsList');
+        const opsListS3 = document.getElementById('operationsListStep3');
+        const opsListS4 = document.getElementById('operationsListStep4');
+        const opsToolS1 = document.getElementById('opsToolbarStep1');
+        const opsToolS2 = document.getElementById('opsToolbarStep2');
+        const opsToolS3 = document.getElementById('opsToolbarStep3');
+        const opsToolS4 = document.getElementById('opsToolbarStep4');
+        const pwdGroup = document.getElementById('newPassword')?.closest('.form-group');
+        const emailGroup = document.getElementById('recoveryEmailList')?.closest('.form-group');
+        const phoneGroup = document.getElementById('recoveryPhoneList')?.closest('.form-group');
+        const workerGroup = document.getElementById('numWorkers')?.closest('.form-group');
+        const operationsCard = document.getElementById('operationsCard');
+
+        // Hide all
+        [opsListS1, opsList, opsListS3, opsListS4, opsToolS1, opsToolS2, opsToolS3, opsToolS4]
+            .forEach(el => { if (el) el.classList.add('hidden'); });
+
+        if (pwdGroup) pwdGroup.classList.add('hidden');
+        if (emailGroup) emailGroup.classList.add('hidden');
+        if (phoneGroup) phoneGroup.classList.add('hidden');
+        if (workerGroup) workerGroup.classList.remove('hidden');
+
+        if (selectedSteps.length === 0) {
+            if (operationsCard) {
+                operationsCard.querySelector('h3').innerHTML = '<i class="fas fa-cogs"></i> 3. Operations';
+                operationsCard.querySelector('.card-subtitle').innerText = 'Select at least one step above.';
+            }
+            return;
+        }
+
+        // Show grids/toolbars for selected steps
+        selectedSteps.forEach(val => {
+            if (val === 1) {
+                if (opsListS1) opsListS1.classList.remove('hidden');
+                if (opsToolS1) opsToolS1.classList.remove('hidden');
+            }
+            if (val === 2) {
+                if (opsList) opsList.classList.remove('hidden');
+                if (opsToolS2) opsToolS2.classList.remove('hidden');
+                if (pwdGroup) pwdGroup.classList.remove('hidden');
+                if (emailGroup) emailGroup.classList.remove('hidden');
+                if (phoneGroup) phoneGroup.classList.remove('hidden');
+            }
+            if (val === 3) {
+                if (opsListS3) opsListS3.classList.remove('hidden');
+                if (opsToolS3) opsToolS3.classList.remove('hidden');
+            }
+            if (val === 4) {
+                if (opsListS4) opsListS4.classList.remove('hidden');
+                if (opsToolS4) opsToolS4.classList.remove('hidden');
+            }
+        });
+
+        // Update header
+        if (operationsCard) {
+            if (selectedSteps.length === 1) {
+                const val = selectedSteps[0];
+                const headers = {
+                    1: ['<i class="fas fa-language"></i> 3. Login Operations', 'Select which Step 1 operations to run after login.'],
+                    2: ['<i class="fas fa-cogs"></i> 3. Mutators & Payload', 'Define the vectors to be injected into target accounts.'],
+                    3: ['<i class="fas fa-map-marked-alt"></i> 3. Maps Review Operations', 'Select which Google Maps review operations to run.'],
+                    4: ['<i class="fas fa-gavel"></i> 3. Appeal Operations', 'Select which account appeal operations to run.'],
+                };
+                const [h, s] = headers[val] || ['<i class="fas fa-cogs"></i> 3. Operations', ''];
+                operationsCard.querySelector('h3').innerHTML = h;
+                operationsCard.querySelector('.card-subtitle').innerText = s;
+            } else {
+                const stepLabels = selectedSteps.map(s => `Step ${s}`).join(' + ');
+                operationsCard.querySelector('h3').innerHTML = '<i class="fas fa-layer-group"></i> 3. Combined Operations';
+                operationsCard.querySelector('.card-subtitle').innerText = `Configure operations for ${stepLabels}.`;
+            }
+        }
+    }
+
+    function updateLinkToggle() {
+        const linkToggle = document.getElementById('linkToggle');
+        const linkCheckbox = document.getElementById('linkCheckbox');
+        if (!linkToggle || !linkCheckbox) return;
+
+        const selected = App.getSelectedSteps();
+        if (selected.length >= 2) {
+            linkToggle.classList.remove('disabled');
+            linkCheckbox.disabled = false;
+        } else {
+            linkToggle.classList.add('disabled');
+            linkCheckbox.disabled = true;
+            linkCheckbox.checked = false;
+        }
+    }
+
+    // ── Tier Restrictions (removed — all steps unlocked) ───────────────
+    App.enforceTierRestrictions = function () { /* no-op */ };
+
+    function setupStepSelection() {
+        stepInputs.forEach(input => {
+            input.addEventListener('change', () => {
+                stepCards.forEach(card => {
+                    const cb = card.querySelector('input[type="checkbox"]');
+                    if (cb && cb.checked) {
+                        card.classList.add('active');
+                    } else {
+                        card.classList.remove('active');
+                    }
+                });
+                applyStepUI(App.getSelectedSteps());
+                updateLinkToggle();
+            });
+        });
+    }
+
+    function setupOpsToolbars() {
+        document.querySelectorAll('.ops-toolbar button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const targetId = btn.dataset.target;
+                const grid = document.getElementById(targetId);
+                if (!grid) return;
+                const action = btn.dataset.action;
+                grid.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                    cb.checked = (action === 'select-all');
+                });
+            });
+        });
+    }
+
+    // ── Update Check (removed) ──────────────────────────────────────────
+    App.checkForUpdates = async function (manual) {
+        // Update checking disabled — no-op
+        try {
+            const res = await App.apiFetch('/api/app/version');
+            const data = await res.json();
+            const verEl = document.getElementById('appVersionText');
+            if (verEl) verEl.textContent = data.version || '...';
+        } catch (e) {}
+    };
+
+    function setupUpdateCheck() {
+        var btn = document.getElementById('checkUpdateBtn');
+        if (btn) {
+            btn.addEventListener('click', function () { App.checkForUpdates(true); });
+        }
+        var dismiss = document.getElementById('updateBannerDismiss');
+        if (dismiss) {
+            dismiss.addEventListener('click', function () {
+                var banner = document.getElementById('updateBanner');
+                if (banner) banner.style.display = 'none';
+            });
+        }
+        // Load version text immediately
+        App.apiFetch('/api/app/version').then(function (r) { return r.json(); }).then(function (d) {
+            var el = document.getElementById('appVersionText');
+            if (el && d.version) el.textContent = d.version;
+        }).catch(function () {});
+    }
+
+    // ── License gate ────────────────────────────────────────────────────
+    // Shows a full-screen overlay if no valid license. Backend's @before_request
+    // hook independently blocks API calls, so this is purely UX.
+    async function _setupLicenseGate() {
+        const gate    = document.getElementById('licenseGate');
+        const errEl   = document.getElementById('licenseGateError');
+        const reason  = document.getElementById('licenseGateReason');
+        const midEl   = document.getElementById('licenseGateMachineId');
+        const keyEl   = document.getElementById('licenseGateKey');
+        const actBtn  = document.getElementById('licenseGateActivate');
+        const copyBtn = document.getElementById('licenseGateCopyMid');
+        if (!gate) return true;   // no gate in DOM — assume legacy build, allow
+
+        function showError(msg) {
+            if (!errEl) return;
+            errEl.style.display = 'block';
+            errEl.textContent = msg;
+        }
+        function clearError() { if (errEl) errEl.style.display = 'none'; }
+
+        async function refreshStatus() {
+            try {
+                const r = await App.apiFetch('/api/license/info');
+                const d = await r.json();
+                if (midEl) midEl.textContent = d.machine_id || '—';
+                if (d.valid) {
+                    gate.style.display = 'none';
+                    return true;
+                }
+                gate.style.display = 'flex';
+                if (reason) reason.textContent = d.reason || 'Enter your license key to continue.';
+                return false;
+            } catch (e) {
+                // backend not up yet — retry briefly, then allow (offline mode)
+                gate.style.display = 'none';
+                return true;
+            }
+        }
+
+        if (copyBtn && midEl) {
+            copyBtn.addEventListener('click', () => {
+                try { navigator.clipboard.writeText(midEl.textContent || ''); } catch {}
+                copyBtn.textContent = 'Copied!';
+                setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+            });
+        }
+
+        if (actBtn && keyEl) {
+            const doActivate = async () => {
+                clearError();
+                const key = (keyEl.value || '').trim();
+                if (!key) { showError('Please enter a license key'); return; }
+                actBtn.disabled = true;
+                actBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Activating…';
+                try {
+                    const r = await App.apiFetch('/api/license/activate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ license_key: key })
+                    });
+                    const d = await r.json();
+                    if (d.success) {
+                        gate.style.display = 'none';
+                        if (window.App && App.toast) App.toast('License activated ✓', 'success');
+                        // Reload so all panels refresh against the now-licensed backend.
+                        setTimeout(() => location.reload(), 600);
+                    } else {
+                        showError(d.message || 'Activation failed');
+                    }
+                } catch (e) {
+                    showError('Could not reach backend: ' + e.message);
+                } finally {
+                    actBtn.disabled = false;
+                    actBtn.innerHTML = '<i class="fas fa-unlock-alt" style="margin-right:6px;"></i> Activate';
+                }
+            };
+            actBtn.addEventListener('click', doActivate);
+            keyEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') doActivate(); });
+        }
+
+        // Poll for ~12s while the backend boots, then settle.
+        for (let i = 0; i < 6; i++) {
+            const ok = await refreshStatus();
+            if (ok || gate.style.display === 'flex') return ok;
+            await new Promise(r => setTimeout(r, 2000));
+        }
+        return false;
+    }
+    App.checkLicense = _setupLicenseGate;
+
+    // ── Init ────────────────────────────────────────────────────────────
+    function init() {
+        // Fire license gate setup early — non-blocking; the overlay covers
+        // the UI on its own if validation fails.
+        _setupLicenseGate();
+
+        setupNavigation();
+        App.setupServerToggle();
+        // Process page removed — guard optional setup calls
+        if (App.setupFileInput) App.setupFileInput();
+        if (App.setupProcessControls) App.setupProcessControls();
+        if (stepInputs.length) setupStepSelection();
+        if (document.querySelector('.ops-toolbar')) setupOpsToolbars();
+        
+        // Global Escape key to close modals
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.querySelectorAll('.profile-modal-overlay').forEach(overlay => {
+                    if (window.getComputedStyle(overlay).display !== 'none') {
+                        const closeBtn = overlay.querySelector('#profileModalCloseBtn, .pm-modal-close, button[id$="CloseBtn"]');
+                        if (closeBtn) closeBtn.click();
+                        else overlay.style.display = 'none';
+                    }
+                });
+            }
+        });
+
+        App.setupDeleteAllReports();
+        App.setupGenerateReport();
+        App.setupGenerateTemplate();
+        App.setupClearLog();
+        App.setupConfigPanel();
+        App.setupFingerprintPanel();
+        if (App.setupNexusApiKeyPanel) App.setupNexusApiKeyPanel();
+        App.setupDebugPanel();
+        if (App.setupToolsPage) App.setupToolsPage();
+        if (App.setupProfilesPage) App.setupProfilesPage();
+        if (App.setupLogsPanel) App.setupLogsPanel();
+        setupUpdateCheck();
+
+        // Start offline; auto-detect will flip to online if backend is already up
+        App.setServerOffline();
+
+        // After login, enforce tier restrictions
+        var _origOnAuth = App.onAuthenticated;
+        App.onAuthenticated = function () {
+            if (typeof _origOnAuth === 'function') _origOnAuth();
+            App.enforceTierRestrictions();
+        };
+
+        // Start polling for status
+        App.startProgressPolling();
+
+        // Auto-detect if backend is already running
+        App.autoDetectServer();
+
+        // Auto-detect running operations (restores progress panel after refresh)
+        if (App._autoDetectRunningOps) App._autoDetectRunningOps();
+    }
+
+    document.addEventListener('DOMContentLoaded', init);
+
+})(window.App || (window.App = {}));

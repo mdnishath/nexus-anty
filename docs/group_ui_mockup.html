@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0b1220;
+    color: #e2e8f0;
+    font-family: 'Segoe UI', Roboto, system-ui, sans-serif;
+    padding: 28px;
+    width: 1060px;
+  }
+  h1 { font-size: 18px; margin-bottom: 4px; color:#f1f5f9; }
+  .sub { color:#64748b; font-size:13px; margin-bottom:22px; }
+  .panel {
+    background: #111c2e;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 18px 18px 20px;
+    margin-bottom: 22px;
+  }
+  .panel-title {
+    font-size: 13px; font-weight: 600; color:#94a3b8;
+    text-transform: uppercase; letter-spacing: .5px;
+    margin-bottom: 14px; display:flex; align-items:center; gap:8px;
+  }
+  .panel-title .num { background:rgba(99,102,241,0.2); color:#a5b4fc; border-radius:6px; padding:1px 8px; font-size:12px; }
+
+  /* group manager rows */
+  .gm-row {
+    display:flex; align-items:center; gap:10px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 8px;
+  }
+  .gm-sub { margin-left: 28px; background: rgba(255,255,255,0.02); }
+  .pill {
+    display:inline-flex; align-items:center; gap:6px;
+    font-size:12px; font-weight:500; padding:3px 11px; border-radius:20px;
+    background: rgba(99,102,241,0.18); color:#a5b4fc; border:1px solid rgba(99,102,241,0.3);
+  }
+  .pill.restore { background: rgba(245,158,11,0.16); color:#f59e0b; border:1px solid rgba(245,158,11,0.4); }
+  .pill.pass    { background: rgba(56,189,248,0.16); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); }
+  .count { font-size:12px; color:#64748b; }
+  .arrow { color:#475569; font-size:14px; }
+  .spacer { flex:1; }
+  .hint { font-size:11px; color:#475569; font-style:italic; }
+  .btns { display:flex; gap:6px; }
+  .btn { font-size:11px; padding:3px 10px; border-radius:6px; border:1px solid; cursor:pointer; }
+  .btn.rename { background:rgba(99,102,241,0.15); color:#a5b4fc; border-color:rgba(99,102,241,0.3); }
+  .btn.move   { background:rgba(34,197,94,0.12); color:#4ade80; border-color:rgba(34,197,94,0.25); }
+  .btn.del    { background:rgba(239,68,68,0.12); color:#f87171; border-color:rgba(239,68,68,0.25); }
+
+  /* dropdown */
+  .dd {
+    width: 360px; background:#0d1626; border:1px solid rgba(255,255,255,0.12);
+    border-radius:8px; padding:6px; font-size:13px;
+  }
+  .opt { padding:6px 10px; border-radius:5px; color:#cbd5e1; }
+  .opt.parent { font-weight:600; color:#e2e8f0; }
+  .opt.child { color:#94a3b8; padding-left:30px; }
+  .opt.all { color:#64748b; border-bottom:1px solid rgba(255,255,255,0.08); margin-bottom:4px; }
+  .opt.sel { background:rgba(99,102,241,0.22); color:#c7d2fe; }
+  .opt .c { color:#64748b; font-weight:400; }
+
+  /* table */
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:#64748b; font-weight:600; font-size:11px; text-transform:uppercase; padding:6px 10px; border-bottom:1px solid rgba(255,255,255,0.08);}
+  td { padding:9px 10px; border-bottom:1px solid rgba(255,255,255,0.05); }
+  .email { color:#cbd5e1; }
+  .gsel {
+    display:inline-flex; align-items:center; gap:5px; background:#0d1626;
+    border:1px solid rgba(255,255,255,0.14); border-radius:6px; padding:3px 9px; color:#cbd5e1; font-size:12px;
+  }
+  .gsel .car { color:#64748b; font-size:10px; }
+  .badge {
+    display:inline-flex; align-items:center; gap:4px; font-size:10px; font-weight:600;
+    padding:1px 7px; border-radius:4px; white-space:nowrap; margin-left:6px;
+  }
+  .badge.restore { background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.4); }
+  .badge.pass    { background:rgba(56,189,248,0.15); color:#38bdf8; border:1px solid rgba(56,189,248,0.4); }
+  .st { font-size:11px; padding:2px 8px; border-radius:10px; }
+  .st.fail { background:rgba(239,68,68,0.14); color:#f87171; }
+  .st.nli  { background:rgba(148,163,184,0.14); color:#94a3b8; }
+  .legend { display:flex; gap:18px; margin-top:6px; font-size:12px; color:#94a3b8; }
+</style>
+</head>
+<body>
+  <h1>Group UI — parent + sub-group organization</h1>
+  <div class="sub">Prottek parent group er nicche tar "Try to restore" / "Password Changed" sub-group indent kore dekhabe. Account parent eo thake, sub eo thake.</div>
+
+  <!-- 1. GROUP MANAGER -->
+  <div class="panel">
+    <div class="panel-title"><span class="num">1</span> Group Manager — ek nojore koto suspend / pass-changed</div>
+
+    <div class="gm-row">
+      <span class="pill">SD-152</span><span class="count">152 profiles</span>
+      <span class="spacer"></span>
+      <div class="btns"><span class="btn rename">✎ Rename</span><span class="btn move">⇄ Move</span><span class="btn del">🗑</span></div>
+    </div>
+    <div class="gm-row gm-sub">
+      <span class="arrow">↳</span><span class="pill restore">↻ Try to restore</span><span class="count">5 profiles</span>
+      <span class="spacer"></span><span class="hint">auto · clears on next successful login</span>
+    </div>
+    <div class="gm-row gm-sub">
+      <span class="arrow">↳</span><span class="pill pass">🔑 Password Changed</span><span class="count">3 profiles</span>
+      <span class="spacer"></span><span class="hint">auto · clears on next successful login</span>
+    </div>
+
+    <div class="gm-row">
+      <span class="pill">SD-200</span><span class="count">98 profiles</span>
+      <span class="spacer"></span>
+      <div class="btns"><span class="btn rename">✎ Rename</span><span class="btn move">⇄ Move</span><span class="btn del">🗑</span></div>
+    </div>
+    <div class="gm-row gm-sub">
+      <span class="arrow">↳</span><span class="pill restore">↻ Try to restore</span><span class="count">2 profiles</span>
+      <span class="spacer"></span><span class="hint">auto · clears on next successful login</span>
+    </div>
+
+    <div class="gm-row">
+      <span class="pill">default</span><span class="count">10 profiles</span>
+      <span class="spacer"></span>
+      <div class="btns"><span class="btn rename">✎ Rename</span><span class="btn move">⇄ Move</span></div>
+    </div>
+  </div>
+
+  <!-- 2. FILTER DROPDOWN -->
+  <div class="panel">
+    <div class="panel-title"><span class="num">2</span> Top filter dropdown — sub-group e click korle sudhu segula</div>
+    <div class="dd">
+      <div class="opt all">All Groups</div>
+      <div class="opt parent">SD-152 <span class="c">(152)</span></div>
+      <div class="opt child sel">↳ Try to restore <span class="c">(5)</span></div>
+      <div class="opt child">↳ Password Changed <span class="c">(3)</span></div>
+      <div class="opt parent">SD-200 <span class="c">(98)</span></div>
+      <div class="opt child">↳ Try to restore <span class="c">(2)</span></div>
+      <div class="opt parent">default <span class="c">(10)</span></div>
+    </div>
+    <div class="legend">⤷ "SD-152 ↳ Try to restore (5)" select korle table e sudhu oi 5 ta suspend account.</div>
+  </div>
+
+  <!-- 3. PROFILE TABLE -->
+  <div class="panel">
+    <div class="panel-title"><span class="num">3</span> Profile table — parent column thik thake, pasher badge bole status</div>
+    <table>
+      <thead><tr><th>Email</th><th>Group</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="email">yakubuabdulrauf525@gmail.com</td>
+          <td><span class="gsel">SD-152 <span class="car">▾</span></span><span class="badge restore">↻ restore</span></td>
+          <td><span class="st fail">login failed</span></td>
+        </tr>
+        <tr>
+          <td class="email">peaceyusuf502@gmail.com</td>
+          <td><span class="gsel">SD-152 <span class="car">▾</span></span><span class="badge pass">🔑 pass</span></td>
+          <td><span class="st fail">login failed</span></td>
+        </tr>
+        <tr>
+          <td class="email">tanimuumar623@gmail.com</td>
+          <td><span class="gsel">SD-152 <span class="car">▾</span></span></td>
+          <td><span class="st nli">not logged in</span></td>
+        </tr>
+        <tr>
+          <td class="email">ibro330022@gmail.com</td>
+          <td><span class="gsel">SD-200 <span class="car">▾</span></span><span class="badge restore">↻ restore</span></td>
+          <td><span class="st fail">login failed</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="legend">Group column e parent (SD-152) thake — pasher chhoto badge bole oi account ta suspend (↻) na pass-changed (🔑).</div>
+  </div>
+</body>
+</html>

@@ -424,6 +424,41 @@
         _countryWorking = false;
     }
 
+    // === Login-outcome sub-groups ===
+    // A flagged profile keeps its parent group and ALSO gains a sub-group named
+    // "<parent> / Try to restore" (suspended) or "<parent> / Password Changed".
+    // These render indented under their parent everywhere groups are listed.
+    const _SUB_LEAVES = ['Try to restore', 'Password Changed'];
+    function _subLeaf(g) {
+        for (const leaf of _SUB_LEAVES) {
+            const suf = ' / ' + leaf;
+            if (g && g.endsWith(suf)) return { parent: g.slice(0, -suf.length), leaf };
+        }
+        return null;
+    }
+    // Flat group names -> ordered rows: each parent immediately followed by its subs.
+    function _groupTree(groups) {
+        const parents = [], subsByParent = {};
+        (groups || []).forEach(g => {
+            const s = _subLeaf(g);
+            if (s) (subsByParent[s.parent] = subsByParent[s.parent] || []).push({ name: g, leaf: s.leaf });
+            else parents.push(g);
+        });
+        parents.sort((a, b) => a.localeCompare(b));
+        const rows = [];
+        parents.forEach(p => {
+            rows.push({ name: p, label: p, isSub: false });
+            (subsByParent[p] || []).sort((a, b) => a.leaf.localeCompare(b.leaf))
+                .forEach(s => rows.push({ name: s.name, label: s.leaf, isSub: true, parent: p }));
+            delete subsByParent[p];
+        });
+        // Orphan subs whose parent group has no members of its own — show flat.
+        Object.keys(subsByParent).sort().forEach(p => {
+            subsByParent[p].forEach(s => rows.push({ name: s.name, label: s.name, isSub: false }));
+        });
+        return rows;
+    }
+
     // === Group dropdown ===
     let _groupOptionsCache = null;
 
@@ -431,7 +466,9 @@
         if (_groupOptionsCache && !force) return _groupOptionsCache;
         try {
             const data = await _api('/api/profiles/groups');
-            _groupOptionsCache = (data && data.groups) ? data.groups.slice() : [];
+            // Per-row group selector offers real parent groups only — sub-groups
+            // ("… / Try to restore") are auto-managed by the login flow.
+            _groupOptionsCache = (data && data.groups) ? data.groups.filter(g => !_subLeaf(g)) : [];
         } catch {
             _groupOptionsCache = [];
         }
@@ -553,7 +590,15 @@
     }
 
     function _groupSelectHTML(p, groupOptions) {
-        const cur = (p.groups && p.groups.length) ? p.groups[0] : (p.group || 'default');
+        const allG = (p.groups && p.groups.length) ? p.groups : (p.group ? [p.group] : ['default']);
+        // Show the parent group in the selector; sub-group state shows as a badge.
+        const cur = allG.find(g => !_subLeaf(g)) || 'default';
+        const flags = allG.map(_subLeaf).filter(Boolean);
+        const hasRestore = flags.some(f => f.leaf === 'Try to restore');
+        const hasPwd = flags.some(f => f.leaf === 'Password Changed');
+        const badge =
+            (hasRestore ? `<span class="pm-subtag" title="Suspended — try to restore" style="background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);border-radius:4px;padding:1px 6px;font-size:10px;white-space:nowrap;"><i class="fas fa-rotate-right"></i> restore</span>` : '')
+          + (hasPwd ? `<span class="pm-subtag" title="Password changed" style="background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);border-radius:4px;padding:1px 6px;font-size:10px;white-space:nowrap;"><i class="fas fa-key"></i> pass</span>` : '');
         const options = groupOptions || [];
         const inCache = options.includes(cur);
         const curOpt = inCache ? '' : `<option value="${_esc(cur)}" selected>${_esc(cur)}</option>`;
@@ -564,6 +609,7 @@
                 <option disabled>──────────</option>
                 <option value="__NEW__">+ New group…</option>
             </select>
+            ${badge}
             <button class="btn btn-outline btn-sm pm-appeal-btn" data-id="${p.id}" title="Do Appeal for this profile" style="color:#f59e0b;border-color:rgba(245,158,11,0.5);padding:4px 8px;font-size:11px;"><i class="fas fa-gavel"></i> Do Appeal</button>
         </div>`;
     }
@@ -783,7 +829,7 @@
 
             if (countsData && countsData.success) {
                 _updateFilterCounts(countsData.by_filter || {});
-                _refreshGroupsFromProfiles(countsData.groups || []);
+                _refreshGroupsFromProfiles(countsData.groups || [], countsData.counts || {});
             }
 
             if (!data.success) { listEl.innerHTML = '<div class="tools-empty">Failed to load profiles</div>'; return; }
@@ -1360,7 +1406,23 @@
                 listEl.innerHTML = '<div style="color:#64748b;text-align:center;padding:20px;">No groups yet</div>';
                 return;
             }
-            listEl.innerHTML = groups.map(g => `
+            listEl.innerHTML = _groupTree(groups).map(node => {
+                if (node.isSub) {
+                    const isRestore = node.label === 'Try to restore';
+                    const color = isRestore ? '#f59e0b' : '#38bdf8';
+                    const icon = isRestore ? 'fa-rotate-right' : 'fa-key';
+                    return `
+                    <div class="gm-row gm-subrow" data-group="${_esc(node.name)}" style="margin-left:26px;opacity:0.95;">
+                        <div style="display:flex;align-items:center;gap:8px;flex:1;">
+                            <span style="color:#64748b;">↳</span>
+                            <span class="pm-group-pill" style="pointer-events:none;background:${color}26;color:${color};border:1px solid ${color}66;"><i class="fas ${icon}"></i> ${_esc(node.label)}</span>
+                            <span style="font-size:12px;color:#64748b;">${counts[node.name] || 0} profiles</span>
+                        </div>
+                        <div style="font-size:11px;color:#475569;font-style:italic;">auto · clears on next successful login</div>
+                    </div>`;
+                }
+                const g = node.name;
+                return `
                 <div class="gm-row" data-group="${_esc(g)}">
                     <div style="display:flex;align-items:center;gap:10px;flex:1;">
                         <span class="pm-group-pill" style="pointer-events:none;">${_esc(g)}</span>
@@ -1371,8 +1433,8 @@
                         <button class="btn btn-sm gm-move-btn" data-group="${_esc(g)}" style="background:rgba(34,197,94,0.12);color:#4ade80;border:1px solid rgba(34,197,94,0.25);padding:3px 10px;"><i class="fas fa-arrows-alt"></i> Move</button>
                         ${g !== 'default' ? `<button class="btn btn-sm gm-delete-btn" data-group="${_esc(g)}" style="background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.25);padding:3px 10px;"><i class="fas fa-trash"></i></button>` : ''}
                     </div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
 
             listEl.querySelectorAll('.gm-rename-btn').forEach(btn => btn.addEventListener('click', () => _openRenameGroup(btn.dataset.group)));
             listEl.querySelectorAll('.gm-move-btn').forEach(btn => btn.addEventListener('click', () => _openMoveGroup(btn.dataset.group)));
@@ -4122,45 +4184,34 @@
 
     // ── Group helpers ──────────────────────────────────────────────────────────
 
-    function _refreshGroupsFromProfiles(allProfilesOrGroups) {
-        // Accepts either:
-        //   - a flat array of group-name strings (from /api/profiles/counts)
-        //   - a list of profile objects (legacy callers — extracts groups)
-        // The counts endpoint returns the group list directly so we no longer
-        // need to walk the full profile array just to dedupe groups.
-        if (!allProfilesOrGroups || !allProfilesOrGroups.length) return;
-        let groups;
-        if (typeof allProfilesOrGroups[0] === 'string') {
-            groups = allProfilesOrGroups.slice().sort();
-        } else {
-            const groupSet = new Set();
-            allProfilesOrGroups.forEach(p => {
-                const gs = (p.groups && p.groups.length) ? p.groups : [(p.group || 'default')];
-                gs.forEach(g => { if (g && g.trim()) groupSet.add(g.trim()); });
-            });
-            groups = [...groupSet].sort();
-        }
-        const selectors = ['pmGroupFilter', 'appealGroupFilter', 'healthGroupFilter'];
-        selectors.forEach(id => {
+    // Single source of truth for filling the group <select>s + datalists.
+    // Renders parents with their sub-groups indented underneath (with counts),
+    // so the main profile view and every post-op refresh stay identical.
+    function _renderGroupSelectors(groups, counts) {
+        counts = counts || {};
+        const tree = _groupTree(groups || []);
+        ['pmGroupFilter', 'appealGroupFilter', 'healthGroupFilter'].forEach(id => {
             const el = document.getElementById(id);
             if (!el) return;
             const current = el.value;
             el.innerHTML = '<option value="">All Groups</option>';
-            groups.forEach(g => {
+            tree.forEach(node => {
                 const opt = document.createElement('option');
-                opt.value = g;
-                opt.textContent = g;
+                opt.value = node.name;
+                const c = counts[node.name] || 0;
+                opt.textContent = node.isSub
+                    ? `   ↳ ${node.label} (${c})`
+                    : `${node.label} (${c})`;
                 el.appendChild(opt);
             });
-            el.value = (groups.includes(current)) ? current : '';
+            el.value = current;
         });
-        // Also update datalists
-        const datalists = ['pmGroupList', 'batchLoginGroupList'];
-        datalists.forEach(id => {
+        const realGroups = (groups || []).filter(g => !_subLeaf(g));
+        ['pmGroupList', 'batchLoginGroupList'].forEach(id => {
             const dl = document.getElementById(id);
             if (!dl) return;
             dl.innerHTML = '';
-            groups.forEach(g => {
+            realGroups.forEach(g => {
                 const opt = document.createElement('option');
                 opt.value = g;
                 dl.appendChild(opt);
@@ -4168,40 +4219,28 @@
         });
     }
 
+    function _refreshGroupsFromProfiles(allProfilesOrGroups, counts) {
+        // Accepts a flat array of group-name strings (from /api/profiles/counts)
+        // or a list of profile objects. `counts` (optional) drives the (N) suffix.
+        if (!allProfilesOrGroups || !allProfilesOrGroups.length) return;
+        let groups;
+        if (typeof allProfilesOrGroups[0] === 'string') {
+            groups = allProfilesOrGroups.slice();
+        } else {
+            const groupSet = new Set();
+            allProfilesOrGroups.forEach(p => {
+                const gs = (p.groups && p.groups.length) ? p.groups : [(p.group || 'default')];
+                gs.forEach(g => { if (g && g.trim()) groupSet.add(g.trim()); });
+            });
+            groups = [...groupSet];
+        }
+        _renderGroupSelectors(groups, counts);
+    }
+
     async function _loadGroups() {
         try {
             const data = await _api('/api/profiles/groups');
-            const groups = data.groups || [];
-
-            // Populate all group selects/datalists
-            const selectors = ['pmGroupFilter', 'appealGroupFilter', 'healthGroupFilter'];
-            selectors.forEach(id => {
-                const el = document.getElementById(id);
-                if (!el) return;
-                const current = el.value;
-                // Keep "All Groups" option
-                el.innerHTML = '<option value="">All Groups</option>';
-                groups.forEach(g => {
-                    const opt = document.createElement('option');
-                    opt.value = g;
-                    opt.textContent = g;
-                    el.appendChild(opt);
-                });
-                el.value = current;
-            });
-
-            // Populate datalists for text inputs
-            const datalists = ['pmGroupList', 'batchLoginGroupList'];
-            datalists.forEach(id => {
-                const dl = document.getElementById(id);
-                if (!dl) return;
-                dl.innerHTML = '';
-                groups.forEach(g => {
-                    const opt = document.createElement('option');
-                    opt.value = g;
-                    dl.appendChild(opt);
-                });
-            });
+            _renderGroupSelectors(data.groups || [], data.counts || {});
         } catch (e) { /* ignore */ }
     }
 

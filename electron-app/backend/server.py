@@ -2633,17 +2633,20 @@ def profiles_counts():
         'nst': sum(1 for p in profiles if p.get('engine', 'nexus') == 'nst'),
         'nexus': sum(1 for p in profiles if p.get('engine', 'nexus') == 'nexus'),
     }
-    # Collect unique group names (preserves what the dropdown needs to render).
-    groups: set = set()
+    # Collect unique group names + per-group counts (one pass) so the dropdown
+    # can render parent/sub-group nesting WITH counts without a second request.
+    from collections import Counter as _Counter
+    group_counts: _Counter = _Counter()
     for p in profiles:
         for g in profile_manager._get_groups(p):
             if g:
-                groups.add(g)
+                group_counts[g] += 1
     return jsonify({
         'success': True,
         'total': total,
         'by_filter': by_filter,
-        'groups': sorted(groups, key=str.lower),
+        'groups': sorted(group_counts.keys(), key=str.lower),
+        'counts': dict(group_counts),
     })
 
 

@@ -43,6 +43,12 @@ try:
 except Exception:
     pass
 
+# Per-parent sub-group tagging (pure, dependency-free) for login outcomes.
+try:
+    from shared import group_tagging as _gt
+except Exception:
+    import group_tagging as _gt  # packaged fallback
+
 # Credential vault — transparent DPAPI encryption for sensitive profile fields.
 # Imported lazily-ish at module level so init failures don't crash the app.
 try:
@@ -5302,19 +5308,17 @@ async def _launch_profile_context(playwright, profile: dict,
     return context, bridge, stealth
 
 
-# ── "Try to restore" auto-tagging ────────────────────────────────────────────
-# When Google redirects a login attempt to accounts.google.com/v3/signin/rejected
-# (account suspended / disabled), we auto-add the profile to the "Try to restore"
-# group so the operator can see at a glance which mails need recovery work.
-RESTORE_GROUP_NAME = 'Try to restore'
-
-# ── "Password Changed" auto-tagging ──────────────────────────────────────────
-# Triggered when Google's post-password screen shows the multilingual notice
-# 'Your password was changed X days ago' / 'Votre mot de passe a été modifié il y a X jours' / etc.
-# Signals that the account holder rotated their password — our stored copy is
-# stale. Profiles land in a dedicated group so the operator can update them
-# in bulk.
-PASSWORD_CHANGED_GROUP = 'Password Changed'
+# ── Login-outcome auto-tagging (per-parent sub-groups) ───────────────────────
+# A flagged profile STAYS in its parent group and ALSO gains a sub-group named
+# "<parent> / Try to restore" or "<parent> / Password Changed". This lets the
+# operator see, per parent group, how many accounts are suspended vs. had their
+# password rotated. The actual list-surgery lives in shared/group_tagging.py so
+# it can be unit-tested in isolation.
+#
+#   "Try to restore"    → Google redirected login to /signin/rejected (suspended).
+#   "Password Changed"  → post-password screen showed 'password was changed …'.
+RESTORE_GROUP_NAME = _gt.RESTORE_LEAF
+PASSWORD_CHANGED_GROUP = _gt.PASSWORD_CHANGED_LEAF
 
 
 def _is_password_changed_error(err: str) -> bool:
@@ -5331,31 +5335,31 @@ def _is_password_changed_error(err: str) -> bool:
 
 
 def _mark_profile_password_changed(profile_id: str, reason: str = '') -> bool:
-    """MOVE the profile into PASSWORD_CHANGED_GROUP, replacing any existing groups.
+    """Tag the profile 'Password Changed' WITHOUT removing it from its parent.
 
-    Same policy as _mark_profile_for_restore — operator finds these in exactly
-    one place. Original group(s) preserved in `previous_groups` so a later
-    successful re-login (with updated password) can restore the profile to
-    its original group.
+    Adds the per-parent sub-group '<parent> / Password Changed' to the profile's
+    groups while keeping the parent group, so the operator can see at a glance
+    how many accounts in each parent group rotated their password. A later
+    successful re-login strips the tag (see _unmark_restore_if_present).
     """
     with _file_lock:
         profiles = _read_profiles()
         for p in profiles:
             if p.get('id') != profile_id:
                 continue
-            prev = list(p.get('groups') or [])
-            if not prev and p.get('group'):
-                prev = [p['group']]
-            prev = [g for g in prev if g and g != PASSWORD_CHANGED_GROUP]
-            if prev:
-                p['previous_groups'] = prev
-            p['groups'] = [PASSWORD_CHANGED_GROUP]
-            p['group'] = PASSWORD_CHANGED_GROUP
+            current = list(p.get('groups') or ([p['group']] if p.get('group') else []))
+            history = list(p.get('previous_groups') or [])
+            new_groups = _gt.apply_subgroup(current, history, PASSWORD_CHANGED_GROUP)
+            parents = _gt.real_groups(new_groups) or ['default']
+            p['groups'] = new_groups
+            p['group'] = new_groups[0]
+            p['previous_groups'] = parents  # parent(s) kept for manual revert / legacy
             if reason:
                 p['password_changed_reason'] = reason[:200]
             _write_profiles(profiles)
-            _log(f"[LOGIN] {p.get('email', profile_id)} -> MOVED to '{PASSWORD_CHANGED_GROUP}' "
-                 f"(was: {prev or ['default']}, reason: {reason[:80] if reason else 'password changed notice'})", 'warning')
+            _log(f"[LOGIN] {p.get('email', profile_id)} -> tagged "
+                 f"'{_gt.subgroup_name(parents[0], PASSWORD_CHANGED_GROUP)}' "
+                 f"(stays in {parents}, reason: {reason[:80] if reason else 'password changed notice'})", 'warning')
             return True
     return False
 
@@ -5382,62 +5386,59 @@ def _is_signin_rejected_error(err: str) -> bool:
 
 
 def _mark_profile_for_restore(profile_id: str, reason: str = '') -> bool:
-    """MOVE the profile into RESTORE_GROUP_NAME, replacing any existing groups.
+    """Tag the profile 'Try to restore' WITHOUT removing it from its parent.
 
-    User policy: when login flow tags a profile as needing restoration, the
-    operator wants to find it in exactly ONE place — the restore group —
-    not scattered across the original group AND the restore group. The
-    previous group is also stamped onto `previous_groups` so the operator
-    can put it back later if recovery succeeds.
+    Adds the per-parent sub-group '<parent> / Try to restore' to the profile's
+    groups while keeping the parent group, so the operator can see at a glance
+    how many accounts in each parent group are suspended/rejected. A later
+    successful re-login strips the tag (see _unmark_restore_if_present).
     """
     with _file_lock:
         profiles = _read_profiles()
         for p in profiles:
             if p.get('id') != profile_id:
                 continue
-            prev = list(p.get('groups') or [])
-            if not prev and p.get('group'):
-                prev = [p['group']]
-            prev = [g for g in prev if g and g != RESTORE_GROUP_NAME]
-            if prev:
-                p['previous_groups'] = prev  # keep history so user can revert
-            p['groups'] = [RESTORE_GROUP_NAME]
-            p['group'] = RESTORE_GROUP_NAME
+            current = list(p.get('groups') or ([p['group']] if p.get('group') else []))
+            history = list(p.get('previous_groups') or [])
+            new_groups = _gt.apply_subgroup(current, history, RESTORE_GROUP_NAME)
+            parents = _gt.real_groups(new_groups) or ['default']
+            p['groups'] = new_groups
+            p['group'] = new_groups[0]
+            p['previous_groups'] = parents  # keep parent(s) for manual revert / legacy
             if reason:
                 p['restore_reason'] = reason[:200]
             _write_profiles(profiles)
-            _log(f"[LOGIN] {p.get('email', profile_id)} -> MOVED to '{RESTORE_GROUP_NAME}' "
-                 f"(was: {prev or ['default']}, reason: {reason[:80] if reason else 'rejected'})", 'warning')
+            _log(f"[LOGIN] {p.get('email', profile_id)} -> tagged "
+                 f"'{_gt.subgroup_name(parents[0], RESTORE_GROUP_NAME)}' "
+                 f"(stays in {parents}, reason: {reason[:80] if reason else 'rejected'})", 'warning')
             return True
     return False
 
 
 def _unmark_restore_if_present(profile_id: str) -> bool:
-    """Restore the profile FROM RESTORE_GROUP_NAME (and PASSWORD_CHANGED_GROUP) on success.
+    """Strip auto-tag sub-groups on successful login, keeping the parent group.
 
-    Profile gets moved back to its `previous_groups` if we have that history,
-    otherwise falls back to `default`. Called on every successful login —
-    no-op when the profile wasn't in either special group.
+    Removes '<parent> / Try to restore' and '<parent> / Password Changed' (plus
+    any legacy bare-leaf groups) from the profile while preserving its parent
+    group(s). Called on every successful login — no-op when no such tag present.
     """
     with _file_lock:
         profiles = _read_profiles()
         for p in profiles:
             if p.get('id') != profile_id:
                 continue
-            existing = list(p.get('groups') or [])
-            in_restore = RESTORE_GROUP_NAME in existing
-            in_pwd_changed = PASSWORD_CHANGED_GROUP in existing
-            if not (in_restore or in_pwd_changed):
+            existing = list(p.get('groups') or ([p['group']] if p.get('group') else []))
+            if not _gt.has_special(existing):
                 return False
-            # Pull original group(s) from history; fall back to 'default'.
-            restored = list(p.get('previous_groups') or []) or ['default']
+            restored = _gt.strip_subgroups(existing, list(p.get('previous_groups') or []))
             p['groups'] = restored
             p['group'] = restored[0]
             p.pop('previous_groups', None)
             p.pop('restore_reason', None)
             p.pop('password_changed_reason', None)
             _write_profiles(profiles)
-            _log(f"[LOGIN] {p.get('email', profile_id)} -> restored to {restored} after successful login", 'info')
+            _log(f"[LOGIN] {p.get('email', profile_id)} -> cleared restore/password-changed tags, "
+                 f"kept {restored} after successful login", 'info')
             return True
     return False
 

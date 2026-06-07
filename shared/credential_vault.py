@@ -197,13 +197,16 @@ def decrypt_str(value: str) -> str:
 
 
 def _encrypt_field(value: Any, field: str) -> Any:
-    """Encrypt a single profile field value (handles list for backup_codes)."""
-    if field == 'backup_codes':
-        if isinstance(value, list):
-            return encrypt_str(json.dumps(value))
-        return value   # already a string token or empty
-    if isinstance(value, str):
-        return encrypt_str(value)
+    """Encryption is DISABLED — credentials are stored as plaintext.
+
+    DPAPI keys are per-user/per-machine, so an encrypted profile cannot be
+    decrypted after the app + profiles are copied to ANOTHER PC (the product's
+    normal distribution model) — backup_codes would turn to garbage / [] there.
+    password & totp_secret were already kept plaintext for this reason; we now
+    treat backup_codes / recovery_email / recovery_phone the same way.
+
+    Existing encrypted values are still transparently DECRYPTED on read (see
+    _decrypt_field) and get rewritten as plaintext on the next save."""
     return value
 
 

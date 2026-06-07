@@ -1,6 +1,6 @@
 {
   "name": "nexus-anty-profile-manager",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "NST-powered Anti-Detection Profile Manager",
   "main": "main.js",
   "scripts": {
@@ -43,6 +43,10 @@
       {
         "from": "backend/dist/nexus-anty-engine.exe",
         "to": "backend/nexus-anty-engine.exe"
+      },
+      {
+        "from": "ms-playwright",
+        "to": "ms-playwright"
       },
       {
         "from": "../config/",

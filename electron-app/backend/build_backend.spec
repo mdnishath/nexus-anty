@@ -17,8 +17,15 @@
 # =============================================================================
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
+
+# Playwright ships a node-based "driver" (node.exe + package/cli.js) as DATA,
+# not Python modules. There is NO pyinstaller-hooks-contrib hook for it, so we
+# collect it explicitly — without it the frozen exe cannot drive ANY browser
+# (connect_over_cdp for login, launch for live-check/review-stats all fail).
+PLAYWRIGHT_DATAS = collect_data_files('playwright')
 
 # Directory paths (resolved at spec-parse time)
 BACKEND_DIR      = Path('.').resolve()           # electron-app/backend/
@@ -49,7 +56,7 @@ a = Analysis(
         (str(STEP3_DIR),  'step3'),
         (str(STEP4_DIR),  'step4'),
         (str(LINKED_DIR), 'linked'),
-    ],
+    ] + PLAYWRIGHT_DATAS,
     hiddenimports=[
         # ── Profile Manager ────────────────────────────────────────────────
         'shared.profile_manager',

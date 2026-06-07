@@ -35,6 +35,28 @@ def setup_frozen_paths():
             sys.path.insert(0, bundle_dir)
 
 
+def ensure_browsers_path():
+    """Default PLAYWRIGHT_BROWSERS_PATH to the bundled browsers when frozen.
+
+    main.js normally exports this (resources/ms-playwright), but this also covers
+    standalone / step-mode runs of the exe so a fresh PC never needs a download.
+    """
+    if not getattr(sys, 'frozen', False):
+        return
+    cur = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '')
+    if cur and os.path.isdir(cur):
+        return
+    exe_dir = os.path.dirname(sys.executable)
+    for cand in (
+        os.path.join(os.path.dirname(exe_dir), 'ms-playwright'),  # resources/ms-playwright
+        os.path.join(exe_dir, 'ms-playwright'),
+    ):
+        if os.path.isdir(cand):
+            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = cand
+            print(f"[SETUP] Using bundled Playwright browsers: {cand}", flush=True)
+            return
+
+
 # ── Chromium helpers ──────────────────────────────────────────────────────────
 
 def _get_driver_cmd():
@@ -188,6 +210,7 @@ def run_server():
 
 def main():
     setup_frozen_paths()
+    ensure_browsers_path()
     args = sys.argv[1:]
 
     if args and args[0] == '--step1':

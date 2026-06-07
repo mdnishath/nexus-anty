@@ -91,8 +91,15 @@ function startBackendProcess() {
 
         const isDev = !app.isPackaged;
 
-        // Playwright browsers stored in user's AppData (persists between runs)
-        const playwrightBrowsersPath = path.join(app.getPath('userData'), 'playwright');
+        // Playwright browsers: prefer the copy BUNDLED with the installer
+        // (resources/ms-playwright) so a fresh PC needs ZERO downloads. Fall back
+        // to a per-user AppData folder for dev or if the bundle is ever missing.
+        const fs = require('fs');
+        let playwrightBrowsersPath = path.join(app.getPath('userData'), 'playwright');
+        if (!isDev) {
+            const bundledBrowsers = path.join(process.resourcesPath, 'ms-playwright');
+            if (fs.existsSync(bundledBrowsers)) playwrightBrowsersPath = bundledBrowsers;
+        }
 
         if (!isDev) {
             // PRODUCTION: spawn nexus-anty-engine.exe (PyInstaller bundle)

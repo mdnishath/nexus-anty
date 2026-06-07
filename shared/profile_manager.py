@@ -1364,12 +1364,14 @@ def all_status() -> dict:
 def batch_login(file_path: str, num_workers: int = 3,
                 engine: str = 'nexus', os_type: str = 'random',
                 group: str = 'default', stagger_delay: int = 0,
-                perf: dict | None = None) -> dict:
+                perf: dict | None = None, create_only: bool = False) -> dict:
     """
     Read Excel file, create profiles, and login to each.
     Runs in a background thread. Returns immediately.
     engine: browser engine to use (nexus)
     os_type: 'random', 'windows', 'macos', 'linux', 'android', 'ios' — device fingerprint OS
+    create_only=True: Batch Create — create profiles + save credentials + apply
+        Fast Mode, but DO NOT log in (operator logs in later via Re-Login).
     """
     import pandas as pd
 
@@ -1457,7 +1459,7 @@ def batch_login(file_path: str, num_workers: int = 3,
     t = threading.Thread(
         target=_batch_login_worker,
         args=(accounts, num_workers, engine, os_type, group),
-        kwargs={'perf': perf or {}},
+        kwargs={'perf': perf or {}, 'create_only': create_only},
         daemon=True,
         name='batch-login',
     )
@@ -1473,8 +1475,9 @@ def get_batch_login_progress() -> dict:
 
 def _batch_login_worker(accounts: list[dict], num_workers: int,
                         engine: str = 'nexus', os_type: str = 'random',
-                        group: str = 'default', perf: dict | None = None):
-    """Background worker that logs into accounts sequentially or with limited concurrency."""
+                        group: str = 'default', perf: dict | None = None,
+                        create_only: bool = False):
+    """Background worker that creates profiles and (unless create_only) logs in."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from datetime import datetime as _dt
     global _batch_login_progress
@@ -1633,6 +1636,16 @@ def _batch_login_worker(accounts: list[dict], num_workers: int,
                 _log(f"[BATCH] {email}: Fast Mode apply skipped — {_pe}", 'warning')
 
         _log(f"[BATCH] {email}: credentials saved (pwd={'yes' if account.get('password') else 'no'}, totp={'yes' if account.get('totp_secret') else 'no'}, backup_codes={len(account.get('backup_codes', []))})")
+
+        # ── Batch Create mode: profile + credentials + Fast Mode saved above,
+        #    but DO NOT log in. Operator logs in later via Re-Login. ───────────
+        if create_only:
+            _npm.update_profile(profile_id, status='not_logged_in')
+            _log(f"[BATCH] {email} -> profile created (no login)", 'success')
+            with _lock_bl:
+                _batch_login_progress['success'] += 1
+                _batch_login_progress['pending'] = max(0, _batch_login_progress['pending'] - 1)
+            return {'email': email, 'profile_id': profile_id, 'success': True, 'created': True}
 
         # Run login in its own event loop
         try:
@@ -1878,7 +1891,12 @@ def _sheet_review_worker(
         return False
 
     def _move_profile_group(prof_id: str, group_name: str):
-        """Move profile to a named group in both registries. Best-effort."""
+        """Tag profile with a review outcome. 'Posted'/'Not Posted' become a
+        per-parent sub-group ('<parent> / Posted') keeping the parent group;
+        any other name falls back to a plain move. Best-effort."""
+        if group_name in _gt.REVIEW_LEAVES:
+            _mark_profile_review(prof_id, group_name)
+            return
         try: update_profile(prof_id, group=group_name)
         except Exception: pass
         try:
@@ -5428,9 +5446,12 @@ def _unmark_restore_if_present(profile_id: str) -> bool:
             if p.get('id') != profile_id:
                 continue
             existing = list(p.get('groups') or ([p['group']] if p.get('group') else []))
-            if not _gt.has_special(existing):
+            # Only clear the LOGIN dimension — a review tag ('Posted'/'Not Posted')
+            # must survive a successful re-login.
+            if not _gt.has_special(existing, leaves=_gt.LOGIN_LEAVES):
                 return False
-            restored = _gt.strip_subgroups(existing, list(p.get('previous_groups') or []))
+            restored = _gt.strip_subgroups(existing, list(p.get('previous_groups') or []),
+                                           leaves=_gt.LOGIN_LEAVES)
             p['groups'] = restored
             p['group'] = restored[0]
             p.pop('previous_groups', None)
@@ -5439,6 +5460,30 @@ def _unmark_restore_if_present(profile_id: str) -> bool:
             _write_profiles(profiles)
             _log(f"[LOGIN] {p.get('email', profile_id)} -> cleared restore/password-changed tags, "
                  f"kept {restored} after successful login", 'info')
+            return True
+    return False
+
+
+def _mark_profile_review(profile_id: str, leaf: str) -> bool:
+    """Tag the profile with a per-parent REVIEW sub-group ('<parent> / Posted' or
+    '<parent> / Not Posted') WITHOUT removing it from its parent group, and
+    WITHOUT disturbing any login-outcome tag. Replaces the other review leaf so
+    Posted<->Not Posted is mutually exclusive.
+    """
+    with _file_lock:
+        profiles = _read_profiles()
+        for p in profiles:
+            if p.get('id') != profile_id:
+                continue
+            current = list(p.get('groups') or ([p['group']] if p.get('group') else []))
+            history = list(p.get('previous_groups') or [])
+            new_groups = _gt.apply_subgroup(current, history, leaf)
+            parents = _gt.real_groups(new_groups) or ['default']
+            p['groups'] = new_groups
+            p['group'] = parents[0]  # parent stays the primary group
+            _write_profiles(profiles)
+            _log(f"[REVIEW] {p.get('email', profile_id)} -> tagged "
+                 f"'{_gt.subgroup_name(parents[0], leaf)}' (stays in {parents})", 'info')
             return True
     return False
 

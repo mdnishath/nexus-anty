@@ -424,11 +424,19 @@
         _countryWorking = false;
     }
 
-    // === Login-outcome sub-groups ===
+    // === Outcome sub-groups ===
     // A flagged profile keeps its parent group and ALSO gains a sub-group named
-    // "<parent> / Try to restore" (suspended) or "<parent> / Password Changed".
-    // These render indented under their parent everywhere groups are listed.
-    const _SUB_LEAVES = ['Try to restore', 'Password Changed'];
+    // "<parent> / <leaf>" — login outcomes (Try to restore / Password Changed)
+    // and review outcomes (Posted / Not Posted). These render indented under
+    // their parent everywhere groups are listed.
+    const _SUB_LEAVES = ['Try to restore', 'Password Changed', 'Posted', 'Not Posted'];
+    // Per-leaf display style for sub-group rows + per-row badges.
+    const _SUB_STYLE = {
+        'Try to restore':   { color: '#f59e0b', icon: 'fa-rotate-right', badge: 'restore' },
+        'Password Changed': { color: '#38bdf8', icon: 'fa-key',          badge: 'pass' },
+        'Posted':           { color: '#22c55e', icon: 'fa-check',        badge: 'posted' },
+        'Not Posted':       { color: '#f87171', icon: 'fa-ban',          badge: 'not posted' },
+    };
     function _subLeaf(g) {
         for (const leaf of _SUB_LEAVES) {
             const suf = ' / ' + leaf;
@@ -436,25 +444,28 @@
         }
         return null;
     }
-    // Flat group names -> ordered rows: each parent immediately followed by its subs.
+    // Flat group names -> ordered rows. Every parent ALWAYS shows the 4 fixed
+    // sub-groups (Try to restore / Password Changed / Posted / Not Posted), even
+    // at count 0, so the operator can always move accounts into them.
     function _groupTree(groups) {
-        const parents = [], subsByParent = {};
+        const parents = [];
         (groups || []).forEach(g => {
-            const s = _subLeaf(g);
-            if (s) (subsByParent[s.parent] = subsByParent[s.parent] || []).push({ name: g, leaf: s.leaf });
-            else parents.push(g);
+            if (_subLeaf(g)) return;                 // a sub-group "X / leaf" — synthesized below
+            if (_SUB_LEAVES.includes(g)) return;     // legacy bare leaf — not a parent
+            if (!parents.includes(g)) parents.push(g);
         });
         parents.sort((a, b) => a.localeCompare(b));
         const rows = [];
         parents.forEach(p => {
             rows.push({ name: p, label: p, isSub: false });
-            (subsByParent[p] || []).sort((a, b) => a.leaf.localeCompare(b.leaf))
-                .forEach(s => rows.push({ name: s.name, label: s.leaf, isSub: true, parent: p }));
-            delete subsByParent[p];
+            _SUB_LEAVES.forEach(leaf => {
+                rows.push({ name: `${p} / ${leaf}`, label: leaf, isSub: true, parent: p });
+            });
         });
-        // Orphan subs whose parent group has no members of its own — show flat.
-        Object.keys(subsByParent).sort().forEach(p => {
-            subsByParent[p].forEach(s => rows.push({ name: s.name, label: s.name, isSub: false }));
+        // Legacy bare-leaf groups (old global 'Posted' etc.) — keep visible at the
+        // end so nothing is hidden; they migrate to per-parent on the next move.
+        (groups || []).forEach(g => {
+            if (_SUB_LEAVES.includes(g)) rows.push({ name: g, label: `${g} (old/global)`, isSub: false });
         });
         return rows;
     }
@@ -480,6 +491,24 @@
         const prev = selectEl.dataset.prevValue || '';
         let newGroup = selectEl.value;
 
+        // "Mark as <leaf>" — add a per-parent sub-tag, keep the parent group.
+        if (newGroup.startsWith('__SUB__')) {
+            const leaf = newGroup.slice('__SUB__'.length);
+            selectEl.value = prev;  // keep parent shown in the selector
+            try {
+                const res = await _api('/api/profiles/tag-subgroup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ids: [id], leaf }),
+                });
+                if (res.success) {
+                    App.toast(`Marked as "${leaf}" (stays in group)`, 'success');
+                    loadProfiles(); _loadGroups();
+                } else App.toast(res.message || 'Failed', 'error');
+            } catch (e) { App.toast('Error: ' + e.message, 'error'); }
+            return;
+        }
+
         if (newGroup === '__NEW__') {
             const name = (prompt('New group name:') || '').trim();
             if (!name) {
@@ -497,6 +526,31 @@
         }
 
         await _commitGroupChange(id, newGroup, selectEl, prev);
+    }
+
+    // Per-row sub-group mark — tags THIS single profile with the chosen leaf
+    // (account stays in its parent group). Same backend as the bulk Mark box.
+    async function _markRowSubgroup(id, leaf, btn) {
+        if (!id || !leaf) return;
+        const orig = btn ? btn.innerHTML : '';
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; }
+        try {
+            const res = await _api('/api/profiles/tag-subgroup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: [id], leaf }),
+            });
+            if (res && res.success) {
+                App.toast(`Marked "${leaf}" (stays in group)`, 'success');
+                loadProfiles(); _loadGroups();
+            } else {
+                App.toast((res && res.message) || 'Failed', 'error');
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        } catch (e) {
+            App.toast('Error: ' + e.message, 'error');
+            if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+        }
     }
 
     async function _commitGroupChange(id, newGroup, selectEl, prev) {
@@ -542,7 +596,17 @@
         const passLine = hasPass ? `<div class="pm-cred-line">
             <span class="pm-cred-text pm-copyable" data-copy-value="${_esc(p.password)}" data-copy-label="Password" title="Click to copy password" style="letter-spacing:2px;">••••••••</span>
         </div>` : '';
-        return `<div class="pm-col-creds">${emailLine}${passLine}</div>`;
+        // Per-row "Mark sub-group" control — placed under the email/password so it
+        // doesn't crowd the GROUP column. Marks THIS profile only (stays in parent).
+        const rowSubOpts = _SUB_LEAVES.map(leaf =>
+            `<option value="${_esc(leaf)}"${leaf === 'Posted' ? ' selected' : ''}>${_esc(leaf)}</option>`).join('');
+        const markLine = `<div class="pm-row-submark" style="display:flex;gap:4px;align-items:center;margin-top:6px;">
+            <select class="pm-row-sub-select" data-id="${p.id}" title="Sub-group to mark this profile" style="background:#1a233a;border:1px solid rgba(255,255,255,0.12);border-radius:4px;padding:3px 6px;color:#e2e8f0;font-size:11px;max-width:130px;">
+                ${rowSubOpts}
+            </select>
+            <button class="btn btn-sm pm-row-sub-btn" data-id="${p.id}" title="Mark THIS profile as the selected sub-group (stays in its parent group)" style="background:rgba(34,197,94,0.14);color:#4ade80;border:1px solid rgba(34,197,94,0.3);padding:3px 9px;font-size:11px;white-space:nowrap;"><i class="fas fa-tags"></i> Mark</button>
+        </div>`;
+        return `<div class="pm-col-creds">${emailLine}${passLine}${markLine}</div>`;
     }
 
     function _proxyTotpCellHTML(p) {
@@ -593,21 +657,28 @@
         const allG = (p.groups && p.groups.length) ? p.groups : (p.group ? [p.group] : ['default']);
         // Show the parent group in the selector; sub-group state shows as a badge.
         const cur = allG.find(g => !_subLeaf(g)) || 'default';
-        const flags = allG.map(_subLeaf).filter(Boolean);
-        const hasRestore = flags.some(f => f.leaf === 'Try to restore');
-        const hasPwd = flags.some(f => f.leaf === 'Password Changed');
-        const badge =
-            (hasRestore ? `<span class="pm-subtag" title="Suspended — try to restore" style="background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);border-radius:4px;padding:1px 6px;font-size:10px;white-space:nowrap;"><i class="fas fa-rotate-right"></i> restore</span>` : '')
-          + (hasPwd ? `<span class="pm-subtag" title="Password changed" style="background:rgba(56,189,248,0.15);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);border-radius:4px;padding:1px 6px;font-size:10px;white-space:nowrap;"><i class="fas fa-key"></i> pass</span>` : '');
+        const _seenLeaf = new Set();
+        const badge = allG.map(_subLeaf).filter(Boolean).map(f => {
+            if (_seenLeaf.has(f.leaf)) return '';
+            _seenLeaf.add(f.leaf);
+            const st = _SUB_STYLE[f.leaf];
+            if (!st) return '';
+            return `<span class="pm-subtag" title="${_esc(f.leaf)}" style="background:${st.color}26;color:${st.color};border:1px solid ${st.color}66;border-radius:4px;padding:1px 6px;font-size:10px;white-space:nowrap;"><i class="fas ${st.icon}"></i> ${st.badge}</span>`;
+        }).join('');
         const options = groupOptions || [];
         const inCache = options.includes(cur);
         const curOpt = inCache ? '' : `<option value="${_esc(cur)}" selected>${_esc(cur)}</option>`;
         const opts = options.map(g => `<option value="${_esc(g)}"${g === cur ? ' selected' : ''}>${_esc(g)}</option>`).join('');
+        // "Mark as" options apply a per-parent sub-tag (account stays in parent).
+        const subOpts = _SUB_LEAVES.map(leaf =>
+            `<option value="__SUB__${_esc(leaf)}">   ↳ Mark: ${_esc(leaf)}</option>`).join('');
         return `<div class="pm-col-group">
             <select class="pm-group-select" data-id="${p.id}" data-prev-value="${_esc(cur)}">
                 ${curOpt}${opts}
                 <option disabled>──────────</option>
                 <option value="__NEW__">+ New group…</option>
+                <option disabled>── mark (stays in parent) ──</option>
+                ${subOpts}
             </select>
             ${badge}
             <button class="btn btn-outline btn-sm pm-appeal-btn" data-id="${p.id}" title="Do Appeal for this profile" style="color:#f59e0b;border-color:rgba(245,158,11,0.5);padding:4px 8px;font-size:11px;"><i class="fas fa-gavel"></i> Do Appeal</button>
@@ -1107,6 +1178,19 @@
             sel.addEventListener('click', (e) => e.stopPropagation());
             sel.addEventListener('mousedown', (e) => e.stopPropagation());
         });
+        // Per-row sub-group "Mark" control (select + button)
+        listEl.querySelectorAll('.pm-row-sub-select').forEach(sel => {
+            sel.addEventListener('click', (e) => e.stopPropagation());
+            sel.addEventListener('mousedown', (e) => e.stopPropagation());
+        });
+        listEl.querySelectorAll('.pm-row-sub-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const id = btn.dataset.id;
+                const sel = listEl.querySelector(`.pm-row-sub-select[data-id="${id}"]`);
+                _markRowSubgroup(id, sel ? sel.value : '', btn);
+            });
+        });
         // Right-click context menu on rows
         listEl.querySelectorAll('.pm-row').forEach(row => {
             row.addEventListener('contextmenu', (e) => {
@@ -1134,6 +1218,21 @@
         } else {
             bar.style.display = 'none';
         }
+    }
+
+    // Deselect everything — clears the in-memory set, unchecks every visible
+    // row checkbox + the select-all box, and refreshes the bulk bar. Called
+    // after a bulk group/sub-group transfer so the selection doesn't linger.
+    function _clearSelection() {
+        _selectedIds.clear();
+        document.querySelectorAll('.pm-row-check').forEach(cb => {
+            cb.checked = false;
+            const row = cb.closest('.pm-row');
+            if (row) row.classList.remove('pm-selected');
+        });
+        const selectAll = _$('pmSelectAll');
+        if (selectAll) selectAll.checked = false;
+        _updateBulkBar();
     }
 
     function _bulkGroupInput() {
@@ -1230,6 +1329,7 @@
                 let msg = `${data.updated} profile${data.updated !== 1 ? 's' : ''} added to "${group}"`;
                 if (note && data.notes_updated) msg += ` · note saved`;
                 App.toast(msg, 'success');
+                _clearSelection();
                 loadProfiles(); _loadGroups();
             } else App.toast(data.message || 'Failed', 'error');
         } catch(e) { App.toast('Error: ' + e.message, 'error'); }
@@ -1249,6 +1349,25 @@
                 let msg = `${data.updated} profile${data.updated !== 1 ? 's' : ''} moved to "${group}"`;
                 if (note && data.notes_updated) msg += ` · note saved`;
                 App.toast(msg, 'success');
+                _clearSelection();
+                loadProfiles(); _loadGroups();
+            } else App.toast(data.message || 'Failed', 'error');
+        } catch(e) { App.toast('Error: ' + e.message, 'error'); }
+    }
+
+    async function _bulkMarkSubgroup() {
+        const sel = _$('pmBulkSubSelect');
+        const leaf = sel ? sel.value : '';
+        if (!leaf) { App.toast('Pick a sub-group', 'warn'); return; }
+        if (!_selectedIds.size) { App.toast('No profiles selected', 'warn'); return; }
+        try {
+            const data = await _api('/api/profiles/tag-subgroup', {
+                method: 'POST',
+                body: JSON.stringify({ ids: [..._selectedIds], leaf })
+            });
+            if (data.success) {
+                App.toast(`${data.updated} profile${data.updated !== 1 ? 's' : ''} marked "${leaf}" (stay in their group)`, 'success');
+                _clearSelection();
                 loadProfiles(); _loadGroups();
             } else App.toast(data.message || 'Failed', 'error');
         } catch(e) { App.toast('Error: ' + e.message, 'error'); }
@@ -1268,6 +1387,7 @@
                 let msg = `${data.updated} profile${data.updated !== 1 ? 's' : ''} removed from "${group}"`;
                 if (note && data.notes_updated) msg += ` · note saved`;
                 App.toast(msg, 'success');
+                _clearSelection();
                 loadProfiles(); _loadGroups();
             } else App.toast(data.message || 'Failed', 'error');
         } catch(e) { App.toast('Error: ' + e.message, 'error'); }
@@ -1408,9 +1528,9 @@
             }
             listEl.innerHTML = _groupTree(groups).map(node => {
                 if (node.isSub) {
-                    const isRestore = node.label === 'Try to restore';
-                    const color = isRestore ? '#f59e0b' : '#38bdf8';
-                    const icon = isRestore ? 'fa-rotate-right' : 'fa-key';
+                    const st = _SUB_STYLE[node.label] || { color: '#38bdf8', icon: 'fa-tag' };
+                    const color = st.color;
+                    const icon = st.icon;
                     return `
                     <div class="gm-row gm-subrow" data-group="${_esc(node.name)}" style="margin-left:26px;opacity:0.95;">
                         <div style="display:flex;align-items:center;gap:8px;flex:1;">
@@ -2234,10 +2354,36 @@
     // BATCH OPERATIONS
     // ══════════════════════════════════════════════════════════════════════
 
+    // Batch modal mode: false = Batch Login (creates + logs in),
+    //                   true  = Batch Create (creates only, no login).
+    let _batchCreateMode = false;
+
+    function _applyBatchMode() {
+        const title = _$('batchLoginTitle');
+        const startBtn = _$('batchLoginStartBtn');
+        if (_batchCreateMode) {
+            if (title) title.textContent = 'Batch Create (no login)';
+            if (startBtn) startBtn.innerHTML = '<i class="fas fa-layer-group"></i> Create Profiles';
+        } else {
+            if (title) title.textContent = 'Batch Login';
+            if (startBtn) startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+        }
+    }
+
     function openBatchLoginModal() {
+        _batchCreateMode = false;
+        _applyBatchMode();
         _$('batchLoginModalOverlay').classList.add('active');
         _loadGroups();
         // Clear any previous preview
+        _setBatchPreview(null);
+    }
+
+    function openBatchCreateModal() {
+        _batchCreateMode = true;
+        _applyBatchMode();
+        _$('batchLoginModalOverlay').classList.add('active');
+        _loadGroups();
         _setBatchPreview(null);
     }
 
@@ -2731,6 +2877,7 @@
             if (cb.dataset.perfKey) perf[cb.dataset.perfKey] = true;
         });
 
+        const createOnly = _batchCreateMode;
         try {
             const data = await _api('/api/profiles/batch-login', {
                 method: 'POST',
@@ -2738,17 +2885,24 @@
                     file_path: filePath, workers, engine, os_type: osType, group,
                     stagger_delay: staggerDelay,
                     perf: Object.keys(perf).length ? perf : undefined,
+                    create_only: createOnly,
                 })
             });
             if (data.success) {
                 const perfNote = Object.keys(perf).length ? ` · Fast Mode: ${Object.keys(perf).length} setting(s)` : '';
-                App.toast(`Batch login started: ${data.total} accounts — group: ${group}${perfNote}`, 'success');
+                const verb = createOnly ? 'Batch create' : 'Batch login';
+                App.toast(`${verb} started: ${data.total} accounts — group: ${group}${perfNote}`, 'success');
                 closeBatchLoginModal();
+                // Reflect the mode on the progress card (created vs logged-in).
+                if (_OP_CONFIGS['batch-login']) {
+                    _OP_CONFIGS['batch-login'].label = createOnly ? 'Batch Create' : 'Batch Login';
+                    _OP_CONFIGS['batch-login'].successLbl = createOnly ? 'Created' : 'Logged In';
+                }
                 _startOpProgress('batch-login');
                 _startStatusPolling();
                 _loadGroups();
-            } else App.toast(data.message || 'Batch login failed', 'error');
-        } catch (e) { App.toast('Batch login error: ' + e.message, 'error'); }
+            } else App.toast(data.message || (createOnly ? 'Batch create failed' : 'Batch login failed'), 'error');
+        } catch (e) { App.toast((createOnly ? 'Batch create error: ' : 'Batch login error: ') + e.message, 'error'); }
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -3606,6 +3760,61 @@
             }
         } catch(e) {
             App.toast('GMB Review URL error: ' + e.message, 'error');
+        }
+    }
+
+    // Paste GMB URLs line-by-line → resolve to Review URLs → show + copy.
+    async function _generateGmbFromText() {
+        const input = _$('gmbToReviewTextInput');
+        const genBtn = _$('gmbToReviewTextGenBtn');
+        const statusEl = _$('gmbToReviewTextStatus');
+        const wrap = _$('gmbToReviewTextResultWrap');
+        const out = _$('gmbToReviewTextOutput');
+        if (!input) return;
+        const urls = input.value.split('\n').map(s => s.trim()).filter(Boolean);
+        if (!urls.length) { App.toast('Paste at least one GMB URL', 'warn'); return; }
+        const orig = genBtn ? genBtn.innerHTML : '';
+        if (genBtn) { genBtn.disabled = true; genBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating…'; }
+        if (statusEl) { statusEl.style.color = '#94a3b8'; statusEl.textContent = `Resolving ${urls.length} URL(s)…`; }
+        try {
+            const data = await _api('/api/gmb-to-review/text', {
+                method: 'POST', body: JSON.stringify({ urls })
+            });
+            if (data && data.success) {
+                // Keep 1:1 line correspondence with the input.
+                const lines = (data.results || []).map(r =>
+                    r.status === 'success' ? r.review_url : `ERROR (${r.error || 'failed'}): ${r.input}`);
+                if (out) out.value = lines.join('\n');
+                if (wrap) wrap.style.display = 'block';
+                if (statusEl) {
+                    const failed = data.total - data.resolved;
+                    statusEl.style.color = failed ? '#fbbf24' : '#4ade80';
+                    statusEl.textContent = `${data.resolved}/${data.total} resolved` + (failed ? ` · ${failed} failed` : '');
+                }
+            } else {
+                App.toast((data && data.message) || 'Generation failed', 'error');
+                if (statusEl) statusEl.textContent = '';
+            }
+        } catch (e) {
+            App.toast('Error: ' + e.message, 'error');
+            if (statusEl) statusEl.textContent = '';
+        } finally {
+            if (genBtn) { genBtn.disabled = false; genBtn.innerHTML = orig; }
+        }
+    }
+
+    async function _copyGmbTextOutput() {
+        const out = _$('gmbToReviewTextOutput');
+        if (!out || !out.value.trim()) { App.toast('Nothing to copy', 'warn'); return; }
+        try {
+            await navigator.clipboard.writeText(out.value);
+            App.toast('Review URLs copied', 'success');
+        } catch (e) {
+            out.removeAttribute('readonly');
+            out.select();
+            try { document.execCommand('copy'); } catch (_) {}
+            out.setAttribute('readonly', '');
+            App.toast('Review URLs copied', 'success');
         }
     }
 
@@ -6053,6 +6262,7 @@
         _btn('pmBulkAddBtn', _bulkAddToGroup);
         _btn('pmBulkMoveBtn', _bulkMoveToGroup);
         _btn('pmBulkRemoveBtn', _bulkRemoveFromGroup);
+        _btn('pmBulkSubBtn', _bulkMarkSubgroup);
         _btn('pmBulkDeleteBtn', deleteSelectedProfiles);
         _btn('pmBulkSaveNoteBtn', _bulkSaveNoteOnly);
         _btn('pmBulkUpdateProxyBtn', _bulkUpdateProxy);
@@ -6121,7 +6331,7 @@
             _$('profileCreateMenu').classList.toggle('show');
         });
         _btn('pmCreateSingle', (e) => { e.preventDefault(); _$('profileCreateMenu').classList.remove('show'); openCreateModal(); });
-        _btn('pmBatchCreate', (e) => { e.preventDefault(); _$('profileCreateMenu').classList.remove('show'); App.toast('Batch create coming soon', 'info'); });
+        _btn('pmBatchCreate', (e) => { e.preventDefault(); _$('profileCreateMenu').classList.remove('show'); openBatchCreateModal(); });
         _btn('pmBatchImport', (e) => { e.preventDefault(); _$('profileCreateMenu').classList.remove('show'); App.toast('Batch import coming soon', 'info'); });
 
         // Close dropdown on outside click
@@ -6325,6 +6535,9 @@
         _btn('gmbToReviewBrowseBtn', async () => { await browseFile('gmbToReviewFilePath'); _previewGmbFile(); });
         const gmbFileInp = _$('gmbToReviewFilePath');
         if (gmbFileInp) gmbFileInp.addEventListener('input', _previewGmbFile);
+        // Paste-URLs → generate review URLs + copy
+        _btn('gmbToReviewTextGenBtn', _generateGmbFromText);
+        _btn('gmbToReviewTextCopyBtn', _copyGmbTextOutput);
 
         // Export template
         _btn('writeReviewTemplateBtn', async () => {

@@ -88,6 +88,10 @@ desktop.ini
 profiles_backup_*.json
 *_backup_*.json
 
+# Archives (config.zip etc. — may bundle secret tokens/credentials)
+*.zip
+config.zip
+
 # Tool caches
 .code-review-graph/
 .pytest_cache/
@@ -102,3 +106,7 @@ nul
 nexusbrowser/chromium/
 nexusbrowser/depot_tools/
 nexusbrowser/backups/
+
+# Bundled Playwright Chromium staged for the zero-dependency installer (~670MB)
+electron-app/ms-playwright/
+electron-app/backend/nexusbrowser/

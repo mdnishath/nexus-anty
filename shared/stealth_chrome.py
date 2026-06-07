@@ -166,6 +166,35 @@ def _is_nexus_enabled() -> bool:
     return False
 
 
+def _find_bundled_chromium() -> Optional[str]:
+    """Bundled Playwright Chromium (chrome.exe) — zero-dependency installs.
+
+    The installer ships Playwright's Chromium under resources/ms-playwright and
+    main.js exports PLAYWRIGHT_BROWSERS_PATH pointing at it. When no system
+    Chrome / NST / NexusBrowser binary is found, the login flow (connect_over_cdp)
+    can Popen this bundled chrome.exe so a fresh PC never needs a download.
+    """
+    bases = []
+    env_base = os.environ.get('PLAYWRIGHT_BROWSERS_PATH')
+    if env_base:
+        bases.append(Path(env_base))
+    if getattr(sys, 'frozen', False):
+        bases.append(Path(sys.executable).parent.parent / 'ms-playwright')
+        bases.append(Path(sys.executable).parent / 'ms-playwright')
+    for base in bases:
+        try:
+            if not base or not base.exists():
+                continue
+            for cdir in sorted(base.glob('chromium-*')):
+                for sub in ('chrome-win64', 'chrome-win'):
+                    exe = cdir / sub / 'chrome.exe'
+                    if exe.is_file():
+                        return str(exe)
+        except Exception:
+            continue
+    return None
+
+
 def _find_chrome_binary() -> str:
     """Find the real Chrome binary on this system.
 
@@ -219,6 +248,11 @@ def _find_chrome_binary() -> str:
     which = shutil.which('chrome') or shutil.which('google-chrome') or shutil.which('chromium')
     if which:
         return which
+
+    # Last resort: the Chromium bundled with the installer (zero-dependency).
+    bundled = _find_bundled_chromium()
+    if bundled:
+        return bundled
 
     raise FileNotFoundError(
         "Chrome not found. Install Google Chrome or set CHROME_PATH env variable."

@@ -208,6 +208,37 @@ def _invalidate_profiles_cache():
         _profiles_parsed_cache['parsed'] = None
 
 
+def _decrypt_legacy_fields(profiles: list[dict]) -> None:
+    """In-place: convert any legacy DPAPI/XOR-encrypted backup_codes / recovery_*
+    values back to plaintext so the API (and login flow) get usable data. On the
+    next save these are written plaintext (encryption is disabled). Best-effort —
+    values that can't be decrypted on this machine become [] / '' (unrecoverable,
+    e.g. encrypted on a different PC)."""
+    try:
+        import json as _json
+        from shared.credential_vault import decrypt_str as _dec
+    except Exception:
+        return
+
+    def _enc(v):
+        return isinstance(v, str) and (v.startswith('dpapi:v1:') or v.startswith('xor:v1:'))
+
+    for p in profiles:
+        bc = p.get('backup_codes')
+        if _enc(bc):
+            try:
+                p['backup_codes'] = _json.loads(_dec(bc))
+            except Exception:
+                p['backup_codes'] = []
+        for f in ('recovery_email', 'recovery_phone'):
+            v = p.get(f)
+            if _enc(v):
+                try:
+                    p[f] = _dec(v)
+                except Exception:
+                    p[f] = ''
+
+
 def _read_profiles() -> list[dict]:
     pf = _profiles_file()
     if not pf.exists():
@@ -234,6 +265,7 @@ def _read_profiles() -> list[dict]:
             parsed = json.loads(raw)
         except Exception:
             return [dict(p) for p in cached_parsed] if cached_parsed else []
+        _decrypt_legacy_fields(parsed)  # transparently un-encrypt legacy backup/recovery
         cur['parsed'] = parsed
         cur['mtime'] = mtime
         cur['size'] = size
@@ -465,6 +497,33 @@ def bulk_assign_group(ids: list, group: str, mode: str = 'add') -> int:
                     if group not in existing:
                         existing.append(group)
                     _set_groups(p, existing)
+                updated += 1
+        if updated:
+            _write_profiles(profiles)
+    return updated
+
+
+def tag_subgroup(ids: list, leaf: str) -> int:
+    """Add a per-parent outcome sub-group ('<parent> / <leaf>') to each profile,
+    keeping its parent group. Used by the manual UI 'move to sub-group' action
+    (row dropdown + bulk). Replaces the other leaf of the SAME dimension
+    (Posted<->Not Posted, restore<->password-changed); leaves the OTHER
+    dimension untouched. Parent count never changes."""
+    from shared import group_tagging as _gt
+    if leaf not in (_gt.LOGIN_LEAVES + _gt.REVIEW_LEAVES):
+        return 0
+    id_set = set(ids)
+    with _file_lock:
+        profiles = _read_profiles()
+        updated = 0
+        for p in profiles:
+            if p['id'] in id_set:
+                current = list(p.get('groups') or ([p['group']] if p.get('group') else []))
+                history = list(p.get('previous_groups') or [])
+                new_groups = _gt.apply_subgroup(current, history, leaf)
+                parents = _gt.real_groups(new_groups) or ['default']
+                p['groups'] = new_groups
+                p['group'] = parents[0]  # parent stays the primary group
                 updated += 1
         if updated:
             _write_profiles(profiles)
@@ -2574,17 +2633,18 @@ stop_nst_browser = stop_profile_browser
 def batch_login(file_path: str, num_workers: int = 3,
                 engine: str = 'nexus', os_type: str = 'random',
                 group: str = 'default', stagger_delay: int = 0,
-                perf: dict | None = None) -> dict:
+                perf: dict | None = None, create_only: bool = False) -> dict:
     """Batch login from Excel. Delegates to old profile_manager.
 
     `perf` (optional): Fast Mode dict applied to every profile this batch
     touches — saves bandwidth from the very first login attempt.
+    `create_only`: Batch Create — create profiles (+Fast Mode) without logging in.
     """
     from shared import profile_manager as _old_pm
     _sync_state_to_old(_old_pm)  # ensures correct storage_path is used
     return _old_pm.batch_login(
         file_path, num_workers, engine=engine, os_type=os_type, group=group,
-        stagger_delay=stagger_delay, perf=perf or {},
+        stagger_delay=stagger_delay, perf=perf or {}, create_only=create_only,
     )
 
 

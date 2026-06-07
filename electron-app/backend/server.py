@@ -152,7 +152,7 @@ def _gate_internal_api():
         return jsonify({'success': False, 'message': 'Unauthorized (invalid internal token)'}), 401
 
 # ── App Version & Update Check ───────────────────────────────────────────────
-_FALLBACK_VERSION = '2.0.0'  # used when package.json isn't readable (frozen exe)
+_FALLBACK_VERSION = '3.0.0'  # used when package.json isn't readable (frozen exe)
 
 
 def _read_app_version():
@@ -1831,17 +1831,64 @@ def profiles_vault_migrate():
         return jsonify({'success': False, 'message': str(e)})
 
 
-@app.route('/api/profiles/groups', methods=['GET'])
-def profiles_list_groups():
-    """Return all unique profile group names with counts."""
-    profiles = profile_manager.list_profiles()
+# ── Outcome sub-group helpers ────────────────────────────────────────────────
+# A flagged account stays a MEMBER of its parent group but, in the parent VIEW,
+# it's hidden — the parent shows only the "not yet worked" pool (no sub-tag), so
+# the operator sees exactly which accounts still need posting. Selecting a
+# sub-group ("<parent> / Posted") shows that bucket explicitly.
+_SUB_LEAVES_LC = ('try to restore', 'password changed', 'posted', 'not posted')
+
+
+def _is_sub_group_lc(g: str) -> bool:
+    return any(g.endswith(' / ' + leaf) for leaf in _SUB_LEAVES_LC)
+
+
+def _passes_group_filter(gf_lc: str, groups_lc) -> bool:
+    """Sub-group filter = exact membership. PARENT filter = in parent AND NOT
+    tagged into any of that parent's sub-groups (the 'not yet worked' pool)."""
+    if _is_sub_group_lc(gf_lc):
+        return gf_lc in groups_lc
+    if gf_lc not in groups_lc:
+        return False
+    pref = gf_lc + ' / '
+    for g in groups_lc:
+        if g.startswith(pref) and g[len(pref):] in _SUB_LEAVES_LC:
+            return False
+    return True
+
+
+def _outcome_group_counts(profiles):
+    """(all_group_names, counts). A PARENT counts only its un-tagged ('not yet
+    worked') members; each sub-group counts its own members. Every parent name
+    is still returned (even at remaining count 0) so the dropdown keeps showing
+    it with its 4 synthesized sub-groups."""
     from collections import Counter
+    names = set()
     counts = Counter()
     for p in profiles:
-        for g in profile_manager._get_groups(p):
-            counts[g] += 1
-    groups = sorted(counts.keys())
-    return jsonify({'success': True, 'groups': groups, 'counts': dict(counts)})
+        groups = profile_manager._get_groups(p)
+        for g in groups:
+            names.add(g)
+        sub_parents = {g.rsplit(' / ', 1)[0] for g in groups if _is_sub_group_lc(g.lower())}
+        for g in groups:
+            gl = g.lower()
+            if _is_sub_group_lc(gl):
+                counts[g] += 1
+            elif gl in _SUB_LEAVES_LC:
+                counts[g] += 1            # legacy bare leaf (global)
+            elif g in sub_parents:
+                continue                  # worked — excluded from parent's remaining
+            else:
+                counts[g] += 1
+    return sorted(names), dict(counts)
+
+
+@app.route('/api/profiles/groups', methods=['GET'])
+def profiles_list_groups():
+    """Return all profile group names + 'remaining' counts (parent hides worked)."""
+    profiles = profile_manager.list_profiles()
+    groups, counts = _outcome_group_counts(profiles)
+    return jsonify({'success': True, 'groups': groups, 'counts': counts})
 
 
 @app.route('/api/profiles/bulk-assign-group', methods=['POST'])
@@ -1863,6 +1910,22 @@ def profiles_bulk_assign_group():
             except Exception:
                 pass
     return jsonify({'success': True, 'updated': updated, 'notes_updated': notes_updated})
+
+
+@app.route('/api/profiles/tag-subgroup', methods=['POST'])
+def profiles_tag_subgroup():
+    """Tag profiles with a per-parent outcome sub-group ('<parent> / <leaf>'),
+    keeping their parent group. leaf ∈ Try to restore / Password Changed /
+    Posted / Not Posted. Used by manual row + bulk 'move to sub-group'."""
+    data = request.get_json() or {}
+    ids = data.get('ids', [])
+    leaf = (data.get('leaf') or '').strip()
+    if not ids:
+        return jsonify({'success': False, 'message': 'No profiles selected'})
+    if not leaf:
+        return jsonify({'success': False, 'message': 'leaf required'})
+    updated = profile_manager.tag_subgroup(ids, leaf)
+    return jsonify({'success': True, 'updated': updated})
 
 
 @app.route('/api/profiles/bulk-remove-group', methods=['POST'])
@@ -2556,7 +2619,7 @@ def profiles_list():
             else:  # 'name' (default) matches name OR email
                 if search not in row['name_lc'] and search not in row['email_lc']:
                     return False
-        if group_filter and group_filter not in row['groups_lc']:
+        if group_filter and not _passes_group_filter(group_filter, row['groups_lc']):
             return False
         if status_filter == 'running':
             if row['browser_open'] != 'running': return False
@@ -2633,20 +2696,15 @@ def profiles_counts():
         'nst': sum(1 for p in profiles if p.get('engine', 'nexus') == 'nst'),
         'nexus': sum(1 for p in profiles if p.get('engine', 'nexus') == 'nexus'),
     }
-    # Collect unique group names + per-group counts (one pass) so the dropdown
-    # can render parent/sub-group nesting WITH counts without a second request.
-    from collections import Counter as _Counter
-    group_counts: _Counter = _Counter()
-    for p in profiles:
-        for g in profile_manager._get_groups(p):
-            if g:
-                group_counts[g] += 1
+    # Group names + 'remaining' counts (parent hides worked accounts) so the
+    # dropdown renders parent/sub nesting with the right counts in one request.
+    group_names, group_counts = _outcome_group_counts(profiles)
     return jsonify({
         'success': True,
         'total': total,
         'by_filter': by_filter,
-        'groups': sorted(group_counts.keys(), key=str.lower),
-        'counts': dict(group_counts),
+        'groups': sorted(group_names, key=str.lower),
+        'counts': group_counts,
     })
 
 
@@ -3591,11 +3649,12 @@ def profiles_batch_login():
     stagger_delay = max(0, min(int(data.get('stagger_delay', 0)), 120))
     raw_perf = data.get('perf') or {}
     perf = _sanitize_perf(raw_perf) if isinstance(raw_perf, dict) else {}
+    create_only = bool(data.get('create_only', False))
     if not file_path:
         return jsonify({'success': False, 'message': 'File path is required'}), 400
     result = profile_manager.batch_login(
         file_path, num_workers, engine=engine, os_type=os_type, group=group,
-        stagger_delay=stagger_delay, perf=perf,
+        stagger_delay=stagger_delay, perf=perf, create_only=create_only,
     )
     return jsonify(result)
 
@@ -4448,6 +4507,62 @@ def gmb_to_review_preview():
         })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+def _resolve_gmb_review_url(gmb_url: str):
+    """Resolve one GMB URL → Maps review URL. Returns (review_url, error)."""
+    import re
+    import requests as req_lib
+    gmb_url = (gmb_url or '').strip()
+    if not gmb_url:
+        return ('', 'empty')
+    try:
+        r = req_lib.head(gmb_url, allow_redirects=True, timeout=15)
+        match = re.search(r'(?:!1s|ftid=)(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+)', r.url)
+        if match:
+            hex_cid = match.group(1)
+            return (f"https://www.google.com/maps/place//data=!4m3!3m2!1s{hex_cid}!12e1", '')
+        return ('', 'CID not found')
+    except Exception as e:
+        return ('', str(e)[:120])
+
+
+@app.route('/api/gmb-to-review/text', methods=['POST'])
+def gmb_to_review_text():
+    """Resolve a pasted list of GMB URLs (line-by-line) → review URLs.
+
+    Synchronous + concurrent so the UI gets all results back in one call,
+    ready to copy. No Excel file needed."""
+    from concurrent.futures import ThreadPoolExecutor
+    data = request.get_json(force=True, silent=True) or {}
+    urls = data.get('urls', [])
+    if isinstance(urls, str):
+        urls = urls.splitlines()
+    urls = [str(u).strip() for u in urls if str(u).strip()]
+    if not urls:
+        return jsonify({'success': False, 'message': 'No URLs provided'})
+    if len(urls) > 300:
+        return jsonify({'success': False, 'message': 'Too many URLs (max 300 per batch)'})
+
+    results = [None] * len(urls)
+
+    def _work(pair):
+        idx, u = pair
+        review_url, err = _resolve_gmb_review_url(u)
+        return idx, {
+            'input': u,
+            'review_url': review_url,
+            'status': 'success' if review_url else 'failed',
+            'error': err,
+        }
+
+    with ThreadPoolExecutor(max_workers=min(10, len(urls))) as pool:
+        for idx, res in pool.map(_work, list(enumerate(urls))):
+            results[idx] = res
+
+    resolved = sum(1 for r in results if r and r['status'] == 'success')
+    return jsonify({'success': True, 'results': results,
+                    'resolved': resolved, 'total': len(urls)})
 
 
 _gmb_review_progress = {

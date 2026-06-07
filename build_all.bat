@@ -59,6 +59,21 @@ echo      backend.exe built: electron-app\backend\dist\backend.exe
 cd ..\..
 echo.
 
+:: ── Step 3.5: Stage Playwright Chromium (zero-download installer) ──────────
+echo [3.5/4] Staging Playwright Chromium for bundling...
+set "PW_SRC=%LOCALAPPDATA%\ms-playwright"
+set "PW_DST=electron-app\ms-playwright"
+if not exist "%PW_DST%" mkdir "%PW_DST%"
+:: Copy only chromium + headless-shell + ffmpeg (NOT firefox/webkit — unused, saves ~300MB)
+for /d %%D in ("%PW_SRC%\chromium*" "%PW_SRC%\ffmpeg*") do (
+    if not exist "%PW_DST%\%%~nxD" (
+        echo      Copying %%~nxD ...
+        robocopy "%%D" "%PW_DST%\%%~nxD" /E /NFL /NDL /NJH /NJS /NP >nul
+    )
+)
+echo      Chromium staged: %PW_DST%
+echo.
+
 :: ── Step 4: Build Electron installer ──────────────────────────────────────
 echo [4/4] Building Electron NSIS installer...
 cd electron-app
